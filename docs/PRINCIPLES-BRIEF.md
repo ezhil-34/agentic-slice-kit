@@ -85,7 +85,7 @@ Most of an agentic system is not agents anyway. It is storage, contracts,
 policy and views, with one or two agents in the middle.
 
 ## Five anti-patterns
-
+j
 - **The manager agent with no fence** — an LLM deciding which agent runs next,
   with no hop limit and no record of why it chose. The technique is real; the
   version with neither a bound nor a trace is what empties your budget in two
