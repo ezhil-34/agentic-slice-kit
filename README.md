@@ -1,4 +1,4 @@
-# AgentSpec : Misconception Tracker
+# AgentSpec : Misconception Tracker Agent
 
 **Team:** THE TRIAL
 **Department:** AI&DS, Department of Information Technology, MIT, Anna University
