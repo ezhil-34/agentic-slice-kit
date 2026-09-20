@@ -1,7 +1,6 @@
 # The Trial
 ### An Agentic Intelligent Tutoring System for Quadratic Equations
 
-[![Tests](https://img.shields.io/badge/tests-265%20passed-brightgreen.svg)]()
 
 
 
