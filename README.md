@@ -1,9 +1,9 @@
-# The Misconception Tracker
+# The Trial
 ### An Agentic Intelligent Tutoring System for Quadratic Equations
 
 [![Tests](https://img.shields.io/badge/tests-265%20passed-brightgreen.svg)]()
-[![Deterministic Math](https://img.shields.io/badge/math%20grading-100%25%20code-blue.svg)]()
-[![License](https://img.shields.io/badge/license-MIT-lightgrey.svg)]()
+
+
 
 > **"Correctness and diagnosis must be deterministic math, never model opinion."**
 
@@ -38,7 +38,7 @@ Instead of trusting non-deterministic language models to grade arithmetic or gue
 
 ##  System Architecture
 
-The Misconception Tracker runs on a 4-state loop mapped directly onto `slice/records.py`:
+The  Trial runs on a 4-state loop mapped directly onto `slice/records.py`:
 
 ```
                  ┌────────────────────────────────────────┐
@@ -118,7 +118,7 @@ agentic-slice-kit/
 
 ---
 
-## 🚦 Quickstart & Running the Demo
+##  Quickstart & Running the Demo
 
 ### 1. Prerequisites
 Python 3.10+ installed.
@@ -172,5 +172,3 @@ python -m pytest tests/test_integration.py -v
 
 ---
 
-##  License
-MIT License.
