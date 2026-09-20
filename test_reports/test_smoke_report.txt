@@ -1,0 +1,52 @@
+================================================================================
+TEST REPORT: tests/test_smoke.py
+"Does the whole idea-evaluation agent work end-to-end?"
+================================================================================
+
+SUMMARY:
+- Target Component : demo/tracker/ (Full Misconception Tracker end-to-end pipeline)
+- Total Tests      : 11 passed out of 11
+- Status           : ALL PASSED (100%)
+
+PURPOSE & OVERVIEW:
+This test file validates the full end-to-end Misconception Tracker agent using 
+`FakeCall` (canned mock model responses). It proves that the architecture behaves 
+as a true adaptive agent rather than a fixed linear script:
+  - Re-asking on error: Wrong answer -> classify -> reexplain -> re-ask Q1.
+  - Dynamic strategy switching: Switches teaching strategies when same error repeats.
+  - Non-parroting: Re-explanation contains real teaching text, not just error label names.
+  - Audit trail: Every database version record is attributed to a producer.
+  - Human hand-off: 3 consecutive same-bug failures pause into AWAITING_EXPERT state.
+
+--------------------------------------------------------------------------------
+TEST FUNCTION BREAKDOWN:
+--------------------------------------------------------------------------------
+
+1. test_wrong_answer_triggers_reexplanation_then_reasks
+   - Wrong answer triggers classify -> reexplain -> re-asks Q1 with attempt_number=2.
+
+2. test_second_rewrite_uses_a_different_strategy
+   - Second consecutive error switches strategy (e.g. from worked_example to simpler_problem).
+
+3. test_reexplanation_text_is_not_just_the_error_type_name
+   - Confirms explanation text contains actual teaching content, not just the raw strategy string.
+
+4. test_classification_has_error_type_and_reasoning
+   - Validates that classification records contain both error_type and non-empty reasoning.
+
+5. test_every_record_is_attributed_to_a_specific_agent
+   - Verifies produced_by tags across all records (e.g. agent:classify, code:evaluate, system).
+
+6. test_three_failures_triggers_pause_choice
+   - 3 consecutive failures on same bug pauses into AWAITING_EXPERT, asking student to choose strategy.
+
+7. test_history_is_append_only_under_load
+   - Verifies SQLite trigger immutability across full multi-step agent execution.
+
+8. test_student_history_greeting
+   - Returning student with past misconception history receives custom greeting preface naming past bug.
+
+9-11. Multi-Step Flow Variants (test_correct_answer_advances_to_q2, test_collision_triggers_method_check)
+   - Tests progression from Q1 -> Q2 on correct answer, and method-check disambiguation on bug collision.
+
+================================================================================

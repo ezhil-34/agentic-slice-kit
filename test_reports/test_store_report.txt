@@ -1,0 +1,80 @@
+================================================================================
+TEST REPORT: tests/test_store.py
+"Does the memory work at all?"
+================================================================================
+
+SUMMARY:
+- Target Component : slice/store.py (SQLite append-only database system)
+- Total Tests      : 26 passed out of 26
+- Status           : ALL PASSED (100%)
+
+PURPOSE & OVERVIEW:
+This test file validates the core database engine that underpins the entire 
+Agentic Slice Kit architecture. In this kit, "the context window is a cache, 
+the database is the truth." It verifies:
+  1. Durable Run State: A run remembers its exact state across executions.
+  2. Append-Only Invariant: Past versions/history can NEVER be edited or deleted 
+     (enforced by SQLite triggers, not just software convention).
+  3. Versioning & History: Latest version is easy to read, but full historical 
+     diffs are preserved.
+  4. Counter Persistence: Retries and token counts live in SQL tables so they 
+     survive process restarts/crashes.
+  5. Question Queue: Write-once human-in-the-loop question handling.
+
+--------------------------------------------------------------------------------
+TEST FUNCTION BREAKDOWN:
+--------------------------------------------------------------------------------
+
+1. test_create_run_initializes_in_drafting_state
+   - Checks that creating a run sets initial state to DRAFTING and generates a 
+     unique run_id prefix ("run_").
+
+2. test_get_and_set_state
+   - Verifies updating run state (e.g., DRAFTING -> GATING -> COMPLETE) and 
+     persisting state changes cleanly.
+
+3. test_get_state_raises_for_missing_run
+   - Ensures asking for a non-existent run ID raises KeyError("no such run").
+
+4. test_meta_round_trips & test_meta_defaults_to_empty_dict
+   - Verifies storing and reading JSON metadata attached to a run.
+
+5. test_list_runs_ordered_newest_first
+   - Confirms that list_runs() returns runs sorted by created_at DESC (newest first).
+
+6. test_append_returns_incrementing_seq
+   - Verifies appending versions to a run yields sequence numbers 1, 2, 3...
+
+7. test_latest_returns_most_recent_version_of_that_kind
+   - Confirms latest() reads the newest version of a specific record kind (e.g. thesis v2).
+
+8. test_latest_returns_none_when_kind_absent
+   - Returns None cleanly when querying a record kind that hasn't been appended yet.
+
+9. test_history_returns_all_versions_oldest_first
+   - Confirms history() returns the complete timeline of a kind, ordered from oldest to newest.
+
+10. test_replay_returns_entire_run_in_order
+    - Confirms replay() returns every single event in the run across all record kinds.
+
+11. test_versions_table_is_append_only_update_blocked
+    - Verifies that SQLite trigger `versions_no_update` ABORTS any attempt to UPDATE past history.
+
+12. test_versions_table_is_append_only_delete_blocked
+    - Verifies that SQLite trigger `versions_no_delete` ABORTS any attempt to DELETE past history.
+
+13. test_bump_and_counter_accumulate
+    - Verifies atomic counter increments (e.g., tokens, attempt counts).
+
+14. test_counter_defaults_to_zero
+    - Returns 0.0 for un-bumped counter names.
+
+15. test_reset_counter_removes_value
+    - Verifies clearing a counter back to 0.
+
+16-20. Question Queue Tests (test_ask_returns_id, test_answer_updates_question, 
+       test_answers_are_write_once, test_open_questions_filters_by_run_id, test_db_close)
+    - Verifies human-in-the-loop question creation, answering, write-once protection, 
+      and clean database connection teardown.
+
+================================================================================

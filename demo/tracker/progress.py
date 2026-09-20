@@ -13,6 +13,7 @@ Colour vocabulary, used the same way everywhere on screen:
     orange  solved after retries / a mistake corrected but it kept coming back
     red     a mistake that is still unresolved
     blue    the question you are on now
+    grey    skipped, or the answer was shown - not solved, but not still pending
 """
 from __future__ import annotations
 
@@ -29,22 +30,28 @@ _Q_IDS = [q["id"] for q in QUESTIONS]
 def question_outcomes(store: Store, run_id: str) -> dict[str, dict]:
     """Per question in one run: how many attempts, whether it was solved, and
     whether that was on the first try."""
-    out: dict[str, dict] = {qid: {"attempts": 0, "solved": False, "first_try": False}
+    out: dict[str, dict] = {qid: {"attempts": 0, "solved": False, "first_try": False,
+                                  "skipped": False, "revealed": False}
                             for qid in _Q_IDS}
     for a in store.history(run_id, "attempt"):
-        o = out.setdefault(a.payload["question_id"], {"attempts": 0, "solved": False,
-                                                       "first_try": False})
+        o = out[a.payload["question_id"]]
         o["attempts"] += 1
         if a.payload["correct"] and not o["solved"]:
             o["solved"] = True
             o["first_try"] = o["attempts"] == 1
+    # Left without solving: the student's own call, recorded by the flow.
+    for kind, flag in (("skipped", "skipped"), ("reviewed", "revealed")):
+        for r in store.history(run_id, kind):
+            out[r.payload["question_id"]][flag] = True
     return out
 
 
 def tile_status(outcome: dict, is_current: bool = False) -> str:
-    """green / orange / current / todo - one word per question tile."""
+    """green / orange / skipped / current / todo - one word per question tile."""
     if outcome["solved"]:
         return "green" if outcome["first_try"] else "orange"
+    if outcome.get("skipped") or outcome.get("revealed"):
+        return "skipped"
     if is_current:
         return "current"
     return "todo"
@@ -68,7 +75,10 @@ def run_summary(store: Store, run_id: str) -> dict:
     bugs: dict[str, dict] = {}
     seen: dict[str, set[str]] = {}
     for c in store.history(run_id, "classification"):
-        et, qid = c.payload["error_type"], c.payload["question_id"]
+        # A mistake made on a scaffold question counts against the REAL question
+        # it was a warm-up for (root_id) - not a question that is never "solved".
+        et = c.payload["error_type"]
+        qid = c.payload.get("root_id", c.payload["question_id"])
         b = bugs.setdefault(et, {"hits": 0, "pairs": 0, "corrected": 0, "peak": 0})
         b["hits"] += 1
         if qid not in seen.setdefault(et, set()):
@@ -89,6 +99,8 @@ def run_summary(store: Store, run_id: str) -> dict:
         "first_try": sum(1 for o in outcomes.values() if o["first_try"]),
         "recovered": sum(1 for o in outcomes.values() if o["solved"] and not o["first_try"]),
         "tried": sum(1 for o in outcomes.values() if o["attempts"]),
+        "skipped": sum(1 for o in outcomes.values() if o["skipped"] and not o["solved"]),
+        "revealed": sum(1 for o in outcomes.values() if o["revealed"] and not o["solved"]),
         "bugs": bugs,
     }
 

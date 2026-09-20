@@ -92,6 +92,32 @@ def _answer(web, run_id: str, text: str, client=None):
     return r
 
 
+def _wrong(web, run_id: str, text: str = FORGOT_2A, client=None) -> None:
+    """A wrong answer that fits exactly one known mistake, then "yes" to
+    "Looks like X - is that right?"."""
+    _answer(web, run_id, text, client=client)
+    assert 'data-phase="confirm"' in (client or web.client).get(f"/session/{run_id}").text
+    _answer(web, run_id, "yes", client=client)
+
+
+def _warmup(web, run_id: str, client=None) -> None:
+    """Answer the warm-up question on screen correctly."""
+    p = _store(web).latest(run_id, "problem")
+    assert p["phase"] == "scaffold"
+    _answer(web, run_id, " and ".join(str(r) for r in p["roots"]), client=client)
+
+
+def _reach_classify(web, run_id: str, blocking) -> None:
+    """Drive a run to the point the diagnostic agent is called (and parks on
+    `blocking`): one root only matches no pattern, so the tutor asks for a step
+    of working, and skipping that step is what sends it to the model."""
+    _answer(web, run_id, "2")
+    assert 'data-phase="intermediate_step"' in web.client.get(f"/session/{run_id}").text
+    r = web.client.post(f"/session/{run_id}/answer", data={"answer": "skip this step"}, headers=JSON)
+    assert r.status_code == 200
+    assert blocking.entered.wait(10), "advance() never reached classify"
+
+
 def _page(web, run_id: str) -> str:
     r = web.client.get(f"/session/{run_id}")
     assert r.status_code == 200, r.text[:300]
@@ -113,20 +139,20 @@ def test_answer_returns_at_once_and_the_page_shows_the_agents_at_work(web, monke
     blocking = BlockingCall(always_error_type="formula_forgot_2a")
     monkeypatch.setattr(web, "_FLOW", build_flow(blocking))
     run_id = _login(web)
-
-    r = web.client.post(f"/session/{run_id}/answer", data={"answer": FORGOT_2A})
+    _answer(web, run_id, "2")
+    r = web.client.post(f"/session/{run_id}/answer", data={"answer": "skip this step"})
     assert r.status_code == 303 and r.headers["location"] == f"/session/{run_id}?play=1"
 
     assert blocking.entered.wait(10), "advance() never reached classify"
     status = web.client.get(f"/session/{run_id}/status").json()
-    assert status["working"] is True and status["label"] == "Explaining what went wrong…"
-    assert status["active"] == {"agent": "Diagnoser", "doing": "Explaining what went wrong…"}
-    assert [x["agent"] for x in status["steps"]] == ["Evaluator", "Diagnoser"]
+    assert status["working"] is True and status["label"] == "Working out what went wrong…"
+    assert status["active"] == {"agent": "Diagnoser", "doing": "Working out what went wrong…"}
+    assert [x["agent"] for x in status["steps"]] == ["Diagnoser"]
 
     # The same page, mid-turn: the answered question stays, the trail plays below it.
     mid = web.client.get(f"/session/{run_id}?play=1")
     assert mid.status_code == 200 and 'data-play="1"' in mid.text and "Agents at work" in mid.text
-    assert FORGOT_2A in mid.text and Q1["text"] in mid.text
+    assert "skip this step" in mid.text and Q1["text"] in mid.text
     assert '<form id="answer-form"' not in mid.text, "no second submit while the first is being processed"
     # A plain page load mid-advance must not start a second advance() on the run.
     assert 'data-play="1"' in web.client.get(f"/session/{run_id}").text
@@ -170,15 +196,22 @@ def test_a_repeated_mistake_shows_every_agent_in_order(web, monkeypatch):
     run_id = _login(web)
     _answer(web, run_id, FORGOT_2A)
     steps = web.client.get(f"/session/{run_id}/status").json()["steps"]
+    assert [x["agent"] for x in steps] == ["Evaluator", "Diagnoser", "Planner"]
+    assert steps[2]["doing"] == "Asking whether that's what happened."
+
+    _answer(web, run_id, "yes")
+    steps = web.client.get(f"/session/{run_id}/status").json()["steps"]
     assert [x["agent"] for x in steps] == [
-        "Evaluator", "Diagnoser", "Diagnoser", "Planner", "Planner", "Tutor", "Planner"]
-    assert "Factoring is quicker than the quadratic formula" in steps[4]["doing"]
+        "Planner", "Diagnoser", "Planner", "Planner", "Planner", "Tutor", "Planner"]
+    assert "Factoring is quicker than the quadratic formula" in steps[3]["doing"]
+    assert steps[-1]["doing"] == "Setting up a smaller warm-up question."
 
 
 def test_background_crash_still_clears_in_flight_and_marks_the_run_failed(web, monkeypatch):
     monkeypatch.setattr(web, "_FLOW", build_flow(CrashingCall(always_error_type="formula_forgot_2a")))
     run_id = _login(web)
-    _answer(web, run_id, FORGOT_2A)                      # returns only once idle again
+    _answer(web, run_id, "2")
+    _answer(web, run_id, "skip this step")               # -> the diagnostic agent, which crashes
 
     assert not web._is_working(run_id), "a crashed thread must not leave the poller spinning"
     status = web.client.get(f"/session/{run_id}/status").json()
@@ -337,7 +370,7 @@ def test_an_unexpected_error_is_a_friendly_page_not_a_stack_trace(web, monkeypat
 
 # ------------------------------------------------ holes: what may be submitted
 
-@pytest.mark.parametrize("text,msg", [("", "Type an answer first."), ("   ", "Type an answer first."),
+@pytest.mark.parametrize("text,msg", [("", "Fill in both boxes"), ("   ", "Fill in both boxes"),
                                       ("no idea", "as numbers"), ("9" * 300, "under 200")])
 def test_unusable_answers_are_rejected_before_they_are_graded(web, text, msg):
     run_id = _login(web)
@@ -348,11 +381,81 @@ def test_unusable_answers_are_rejected_before_they_are_graded(web, text, msg):
     assert len(callback.pending(st, run_id)) == 1, "the question stays open"
 
 
+# ------------------------------------------------ the two root boxes
+
+def _boxes(web, run_id: str, **fields):
+    r = web.client.post(f"/session/{run_id}/answer", data=fields, headers=JSON)
+    _wait_idle(web, run_id)
+    return r
+
+
+def test_the_practice_page_has_two_root_boxes_and_a_no_solution_box(web):
+    page = _page(web, _login(web))
+    assert 'name="root1"' in page and 'name="root2"' in page and 'name="no_solution"' in page
+    assert 'type="text" name="answer"' not in page, "no free-text answer box any more"
+    assert 'value="skip"' in page and 'value="show me"' in page, "the escape buttons are there"
+
+
+def test_two_root_boxes_are_combined_and_graded(web):
+    run_id = _login(web)
+    assert _boxes(web, run_id, root1="2", root2="3").status_code == 200
+    st = _store(web)
+    att = st.history(run_id, "attempt")[-1].payload
+    assert att["student_answer"] == "2 and 3" and att["correct"] is True
+
+
+def test_fractions_and_negatives_are_accepted_in_the_boxes(web):
+    run_id = _login(web)
+    _boxes(web, run_id, root1="2", root2="3")                         # q1
+    for q in QUESTIONS[1:6]:
+        _boxes(web, run_id, root1=str(q["roots"][0]), root2=str(q["roots"][1]))
+    assert _boxes(web, run_id, root1="1", root2="-1/3").status_code == 200   # q7
+    assert _store(web).history(run_id, "attempt")[-1].payload["correct"] is True
+
+
+@pytest.mark.parametrize("fields,msg", [
+    ({"root1": "2", "root2": ""}, "Fill in both boxes"),
+    ({"root1": "", "root2": ""}, "Fill in both boxes"),
+    ({"root1": "two", "root2": "3"}, "Numbers only"),
+    ({"root1": "2", "root2": "3; DROP"}, "Numbers only"),
+    ({"root1": "1/0", "root2": "3"}, "Numbers only"),
+    ({"root1": "1" * 30, "root2": "3"}, "Numbers only"),
+])
+def test_the_boxes_refuse_anything_that_is_not_a_number(web, fields, msg):
+    run_id = _login(web)
+    r = _boxes(web, run_id, **fields)
+    assert r.status_code == 422 and msg in r.json()["error"]
+    st = _store(web)
+    assert st.history(run_id, "attempt") == [], "a refused box is never graded as a wrong attempt"
+    assert len(callback.pending(st, run_id)) == 1
+
+
+def test_no_real_solution_is_graded_by_code_against_the_discriminant(web):
+    """Every question in the bank has real roots, so ticking the box is wrong -
+    and the model is never asked to classify a claim that names no roots."""
+    run_id = _login(web)
+    # The browser leaves the greyed-out root boxes out of the post entirely.
+    assert _boxes(web, run_id, no_solution="1").status_code == 200
+    st = _store(web)
+    att = st.history(run_id, "attempt")[-1].payload
+    assert att["student_answer"] == "no real solution" and att["correct"] is False
+    cls = st.history(run_id, "classification")[-1]
+    assert cls.payload["error_type"] == "unclassified" and cls.produced_by == "code:evaluate"
+    assert "classify" not in web._CALL.calls
+    assert 'name="root1"' in _page(web, run_id), "and the same question comes back for another try"
+
+
+def test_ticking_no_solution_wins_over_whatever_is_in_the_boxes(web):
+    run_id = _login(web)
+    _boxes(web, run_id, root1="2", root2="3", no_solution="1")
+    assert _store(web).history(run_id, "attempt")[-1].payload["student_answer"] == "no real solution"
+
+
 def test_without_javascript_a_rejected_answer_comes_back_as_a_message_on_the_page(web):
     run_id = _login(web)
     r = web.client.post(f"/session/{run_id}/answer", data={"answer": ""})
     assert r.status_code == 303 and r.headers["location"].endswith("?e=empty")
-    banner = 'role="alert">Type an answer first.'
+    banner = 'role="alert">Fill in both boxes, or tick “No real solution”.'
     assert banner in web.client.get(r.headers["location"]).text
     assert banner not in web.client.get(f"/session/{run_id}?e=<script>").text
 
@@ -361,8 +464,7 @@ def test_a_second_submit_while_working_is_refused_not_double_graded(web, monkeyp
     blocking = BlockingCall(always_error_type="formula_forgot_2a")
     monkeypatch.setattr(web, "_FLOW", build_flow(blocking))
     run_id = _login(web)
-    web.client.post(f"/session/{run_id}/answer", data={"answer": FORGOT_2A}, headers=JSON)
-    assert blocking.entered.wait(10)
+    _reach_classify(web, run_id, blocking)
     assert web.client.post(f"/session/{run_id}/answer", data={"answer": "2 and 3"}, headers=JSON).status_code == 409
     blocking.release.set()
     _wait_idle(web, run_id)
@@ -379,28 +481,45 @@ def test_the_first_page_shows_the_question_and_a_question_tracker(web):
     assert 'data-step-ms="1400"' in page and r"/\d/.test(val)" in page
 
 
-def test_a_wrong_answer_keeps_the_same_question_and_mentions_the_students_answer_again(web, monkeypatch):
+def test_a_wrong_answer_asks_whether_the_mistake_is_what_the_numbers_suggest(web, monkeypatch):
     monkeypatch.setattr(web, "_FLOW", build_flow(FakeCall(always_error_type="formula_forgot_2a")))
     run_id = _login(web)
     _answer(web, run_id, FORGOT_2A)
     page = _page(web, run_id)
-    assert "Question 1 of 10" in page and Q1["text"] in page, "same question, same page"
-    assert "Attempt 2" in page                                            # pill: this is your second try
-    assert "Your answers so far on this question" in page
-    assert f"You answered <code>{FORGOT_2A}</code>" in page                # their earlier response, again
-    assert html.escape(BUG_LABELS["formula_forgot_2a"]) in page            # ...with what was wrong
+    assert 'data-phase="confirm"' in page and "Question 1 of 10" in page and Q1["text"] in page
+    assert "Looks like" in page and html.escape(BUG_LABELS["formula_forgot_2a"]) in page
+    assert "Yes, that&#x27;s it" in page or "Yes, that's it" in page
+    assert f"You answered <code>{FORGOT_2A}</code>" in page
+    assert 'type="text" name="answer"' not in page, "a yes/no is buttons, not free text"
+    assert re.search(r'id="agents"(?![^>]*hidden)', page) and page.count('class="trail-row"') >= 3
+
+
+def test_a_confirmed_mistake_gets_a_warm_up_then_the_real_question_again(web, monkeypatch):
+    monkeypatch.setattr(web, "_FLOW", build_flow(FakeCall(always_error_type="formula_forgot_2a")))
+    run_id = _login(web)
+    _wrong(web, run_id)
+    page = _page(web, run_id)
+    assert 'data-phase="scaffold"' in page and "Warm-up" in page
+    assert "Question 1 of 10" in page, "still question 1 in the tracker"
+    warm = _store(web).latest(run_id, "problem")
+    assert warm["text"] in page and warm["text"] != Q1["text"], "the warm-up shows ITS equation"
     assert "Tutor · worked example" in page and "Why this approach: Factoring is quicker" in page
-    assert "tile current retry" in page
-    # and the agents' trail for that turn is on the same page, under the question
-    assert re.search(r'id="agents"(?![^>]*hidden)', page) and page.count('class="trail-row"') >= 6
+    assert f"You answered <code>{FORGOT_2A}</code>" in page and html.escape(BUG_LABELS["formula_forgot_2a"]) in page
     assert page.index('id="answer-form"') < page.index('id="agents"')
+
+    _warmup(web, run_id)
+    back = _page(web, run_id)
+    assert 'data-phase="practice"' in back and Q1["text"] in back and "Attempt 2" in back
+    assert "Warm-up done" in back and "tile current retry" in back
 
 
 def test_answers_pile_up_in_the_history_and_a_correct_one_moves_on(web, monkeypatch):
     monkeypatch.setattr(web, "_FLOW", build_flow(FakeCall(always_error_type="formula_forgot_2a")))
     run_id = _login(web)
-    _answer(web, run_id, FORGOT_2A)
-    _answer(web, run_id, "7 and 8")
+    _wrong(web, run_id)
+    _warmup(web, run_id)
+    _wrong(web, run_id, "7 and 8")
+    _warmup(web, run_id)
     page = _page(web, run_id)
     assert "You answered <code>7 and 8</code>" in page and f"<code>{FORGOT_2A}</code>" in page
     _answer(web, run_id, CORRECT)
@@ -418,11 +537,14 @@ def test_a_first_time_right_answer_turns_the_tracker_green(web):
 def test_three_repeats_offer_a_choice_on_the_same_page_and_the_choice_is_honoured(web, monkeypatch):
     monkeypatch.setattr(web, "_FLOW", build_flow(FakeCall(always_error_type="formula_forgot_2a")))
     run_id = _login(web)
-    for _ in range(3):
-        _answer(web, run_id, FORGOT_2A)
+    for i in range(3):
+        _wrong(web, run_id)
+        if i < 2:
+            _warmup(web, run_id)
     page = _page(web, run_id)
     assert 'data-phase="choice"' in page and "Question 1 of 10" in page
     assert "Show me a worked example" in page and "Try a simpler problem first" in page
+    assert "Just show me the answer" in page
     assert page.count('<li class="attempt">') == 3, "all three of their answers are listed"
     assert 'type="text" name="answer"' not in page, "the choice is buttons, not free text"
 
@@ -433,18 +555,19 @@ def test_three_repeats_offer_a_choice_on_the_same_page_and_the_choice_is_honoure
     assert "You asked for a simpler practice problem" in after
 
 
-def test_a_sign_flip_asks_which_method_with_buttons_then_carries_on(web):
+def test_a_sign_flip_asks_which_mistake_with_buttons_then_carries_on(web):
     run_id = _login(web)
     _answer(web, run_id, "-2 and -3")
     page = _page(web, run_id)
     assert 'data-phase="method_check"' in page and "fits more than one kind of mistake" in page
-    for label in ("Factorization", "Quadratic formula", "Not sure"):
-        assert f"<b>{label}</b>" in page
+    for label in (BUG_LABELS["formula_sign_flip"].capitalize(), BUG_LABELS["factor_sign_flip"].capitalize(),
+                  "Something else"):
+        assert f"<b>{html.escape(label)}</b>" in page
     assert "You answered <code>-2 and -3</code>" in page
-    web.client.post(f"/session/{run_id}/answer", data={"answer": "factorization"}, headers=JSON)
+    web.client.post(f"/session/{run_id}/answer", data={"answer": "factor_sign_flip"}, headers=JSON)
     _wait_idle(web, run_id)
     after = _page(web, run_id)
-    assert 'data-phase="practice"' in after and "Tutor · worked example" in after
+    assert 'data-phase="scaffold"' in after and "Tutor · worked example" in after
     assert "Staying with factoring" in after
 
 
@@ -462,7 +585,8 @@ def test_finishing_shows_a_summary_and_practise_again_starts_a_fresh_session(web
 def test_the_completion_page_names_the_mistakes_worked_through(web, monkeypatch):
     monkeypatch.setattr(web, "_FLOW", build_flow(FakeCall(always_error_type="formula_forgot_2a")))
     run_id = _login(web)
-    _answer(web, run_id, FORGOT_2A)
+    _wrong(web, run_id)
+    _warmup(web, run_id)
     _finish_all(web, run_id)
     done = _page(web, run_id)
     assert "Session complete" in done and "Dividing by the wrong number" in done and "Under control" in done
@@ -479,9 +603,10 @@ def test_progress_for_a_student_with_no_attempts_yet(web):
 def test_progress_numbers_and_colours(web, monkeypatch):
     monkeypatch.setattr(web, "_FLOW", build_flow(FakeCall(always_error_type="formula_forgot_2a")))
     run_id = _login(web)
-    _answer(web, run_id, FORGOT_2A)          # Q1: wrong ...
+    _wrong(web, run_id)                      # Q1: wrong ...
+    _warmup(web, run_id)
     _answer(web, run_id, CORRECT)            # ... then right  -> orange, one mistake corrected
-    _answer(web, run_id, "6 and 7")          # Q2 (roots -3, -4): wrong
+    _wrong(web, run_id, "-6 and -8")          # Q2 (roots -3, -4): the same forgot-2a mistake again
     page = web.client.get("/profile").text
     rep = progress.report(_store(web), "priya")
     assert rep["attempts"] == 3 and rep["correct"] == 1 and rep["mastery"] == 33
@@ -497,15 +622,18 @@ def test_progress_numbers_and_colours(web, monkeypatch):
 def test_a_repeated_but_fixed_mistake_is_orange_and_a_one_off_is_green(web, monkeypatch):
     monkeypatch.setattr(web, "_FLOW", build_flow(FakeCall(always_error_type="formula_forgot_2a")))
     run_id = _login(web)
-    _answer(web, run_id, FORGOT_2A)
-    _answer(web, run_id, FORGOT_2A)          # same bug twice on Q1 (peak 2)
+    _wrong(web, run_id)
+    _warmup(web, run_id)
+    _wrong(web, run_id)                      # same bug twice on Q1 (peak 2)
+    _warmup(web, run_id)
     _answer(web, run_id, CORRECT)
     assert progress.report(_store(web), "priya")["bugs"]["formula_forgot_2a"]["status"] == "orange"
     assert "Getting there" in web.client.get("/profile").text
 
     sam = TestClient(web.app, follow_redirects=False)
     rid = _login(web, "sam", client=sam)
-    _answer(web, rid, FORGOT_2A, client=sam)
+    _wrong(web, rid, client=sam)
+    _warmup(web, rid, client=sam)
     _answer(web, rid, CORRECT, client=sam)
     assert progress.report(_store(web), "sam")["bugs"]["formula_forgot_2a"]["status"] == "green"
     assert "Under control" in sam.get("/profile").text
@@ -636,3 +764,100 @@ def test_stub_custom_check_reply_is_a_valid_schema_instance():
     out = FakeCall()(settings=None, budget=budget, schema=CustomCheck, step="custom_check",
                      messages=[{"role": "user", "content": "Equation: x\nStudent's answer: 2 and 3"}])
     assert isinstance(out, CustomCheck) and out.student_correct is True
+
+
+# ------------------------------------------------ the ladder's pages: skip, show me, working
+
+def _to_phase(web, run_id: str, phase: str) -> None:
+    if phase == "scaffold":
+        _wrong(web, run_id)
+    elif phase == "confirm":
+        _answer(web, run_id, FORGOT_2A)
+    elif phase == "method_check":
+        _answer(web, run_id, "-2 and -3")
+    elif phase == "intermediate_step":
+        _answer(web, run_id, "2")
+    elif phase == "choice":
+        for i in range(3):
+            _wrong(web, run_id)
+            if i < 2:
+                _warmup(web, run_id)
+    assert f'data-phase="{phase}"' in _page(web, run_id)
+
+
+@pytest.mark.parametrize("phase", ["practice", "scaffold", "confirm", "method_check",
+                                   "intermediate_step", "choice"])
+def test_every_stage_has_skip_and_show_me_buttons_so_nobody_is_trapped(web, monkeypatch, phase):
+    monkeypatch.setattr(web, "_FLOW", build_flow(FakeCall(always_error_type="formula_forgot_2a")))
+    run_id = _login(web)
+    _to_phase(web, run_id, phase)
+    page = _page(web, run_id)
+    assert 'name="answer" value="skip"' in page and 'name="answer" value="show me"' in page
+    assert page.count("formnovalidate") >= 2, "the escape buttons must never be blocked by validation"
+
+
+def test_the_intermediate_step_page_is_free_text_with_its_own_skip(web):
+    run_id = _login(web)
+    _to_phase(web, run_id, "intermediate_step")
+    page = _page(web, run_id)
+    assert 'type="text" name="answer"' in page and 'name="root1"' not in page
+    assert 'value="skip this step"' in page and "Skip this step" in page
+    assert Q1["text"] in page, "the equation stays on screen while they show their working"
+    # working needs no digit (unlike a numeric answer), and is stored as typed
+    r = web.client.post(f"/session/{run_id}/answer", data={"answer": "I just used the formula"}, headers=JSON)
+    assert r.status_code == 200
+    _wait_idle(web, run_id)
+    assert _store(web).history(run_id, "intermediate_step")[-1].payload["raw_answer"] == "I just used the formula"
+
+
+def test_the_which_mistake_buttons_lead_to_the_working_question_on_something_else(web):
+    run_id = _login(web)
+    _to_phase(web, run_id, "method_check")
+    web.client.post(f"/session/{run_id}/answer", data={"answer": "other"}, headers=JSON)
+    _wait_idle(web, run_id)
+    assert 'data-phase="intermediate_step"' in _page(web, run_id)
+
+
+def test_skip_posts_through_even_with_the_number_boxes_empty_or_full(web):
+    run_id = _login(web)
+    r = web.client.post(f"/session/{run_id}/answer",
+                        data={"root1": "", "root2": "", "answer": "skip"}, headers=JSON)
+    assert r.status_code == 200
+    _wait_idle(web, run_id)
+    page = _page(web, run_id)
+    assert "Question 2 of 10" in page and "<b>Skipped</b> question 1" in page and "tile skipped" in page
+
+    r = web.client.post(f"/session/{run_id}/answer",
+                        data={"root1": "2", "root2": "9", "answer": "show me"}, headers=JSON)
+    assert r.status_code == 200
+    _wait_idle(web, run_id)
+    st = _store(web)
+    assert st.history(run_id, "attempt") == [], "a shown answer is never graded as an attempt"
+    assert "x = −3 or x = −4" in st.history(run_id, "reviewed")[-1].payload["solution"]
+    shown = _page(web, run_id)
+    assert "The answer to question 2:" in shown and "Question 3 of 10" in shown
+
+
+def test_a_warm_up_takes_numbers_only_just_like_the_real_question(web):
+    run_id = _login(web)
+    _to_phase(web, run_id, "scaffold")
+    page = _page(web, run_id)
+    assert 'name="root1"' in page and 'name="root2"' in page and "Warm-up" in page
+    r = web.client.post(f"/session/{run_id}/answer", data={"root1": "two", "root2": "3"}, headers=JSON)
+    assert r.status_code == 422 and "Numbers only" in r.json()["error"]
+    assert _store(web).history(run_id, "scaffold_attempt") == []
+
+
+def test_the_completion_page_says_what_was_skipped_and_shows_the_answers_asked_for(web):
+    run_id = _login(web)
+    web.client.post(f"/session/{run_id}/answer", data={"answer": "skip"}, headers=JSON)
+    _wait_idle(web, run_id)
+    web.client.post(f"/session/{run_id}/answer", data={"answer": "show me"}, headers=JSON)
+    _wait_idle(web, run_id)
+    for q in QUESTIONS[2:]:
+        _answer(web, run_id, " and ".join(str(r) for r in q["roots"]))
+    done = _page(web, run_id)
+    assert "Session complete" in done and "8 of 10" in done
+    assert "1 skipped" in done and "1 shown the answer" in done
+    assert "Answers you asked to see" in done and "x² + 7x + 12 = 0" in done
+    assert done.count("tile skipped") == 2

@@ -42,6 +42,9 @@ def _step_for(v: Version) -> Step | None:
     if v.kind == "attempt":
         return Step("Evaluator", "Your answer is correct." if p["correct"]
                     else "Checked your answer against the correct roots - it doesn't match.")
+    if v.kind == "scaffold_attempt":
+        return Step("Evaluator", "Your warm-up answer is correct." if p["correct"]
+                    else "Checked your warm-up answer - it doesn't match.")
     if v.kind == "operator_match":
         n = len(p.get("matched_operators", []))
         if n >= 2:
@@ -53,7 +56,23 @@ def _step_for(v: Version) -> Step | None:
         label = BUG_LABELS.get(p["error_type"], p["error_type"])
         return Step("Diagnoser", f"Working out what went wrong: {label}.")
     if v.kind == "method_choice":
-        return Step("Planner", "Noted which method you used.")
+        return Step("Planner", "Noted which mistake you said you made." if p.get("resolved_operator")
+                    else "Noted that it was something else.")
+    if v.kind == "confirmation":
+        return Step("Planner", "You confirmed that's what happened." if p["confirmed"]
+                    else "You said that wasn't it - looking closer.")
+    if v.kind == "intermediate_step":
+        if p.get("kind") == "skipped":
+            return Step("Diagnoser", "You skipped showing a step.")
+        if p.get("resolved_operator"):
+            return Step("Diagnoser", "Read your working - it shows exactly where it went wrong.")
+        return Step("Diagnoser", "Read your working - it doesn't settle it on its own.")
+    if v.kind == "scaffold_pick":
+        return Step("Planner", p["reason"]) if p.get("scaffold_id") else None
+    if v.kind == "skipped":
+        return Step("Planner", "Skipped that question.")
+    if v.kind == "reviewed":
+        return Step("Planner", "Showed the full worked solution.")
     if v.kind == "misconception":
         n = p["occurrences"]
         return Step("Planner", f"Logged this mistake - {n} time{'' if n == 1 else 's'} on this question.")
@@ -66,8 +85,14 @@ def _step_for(v: Version) -> Step | None:
         return Step("Tutor", f"Wrote a new explanation as a {label}.")
     if v.kind == "problem":
         phase = p.get("phase")
+        if phase == "confirm":
+            return Step("Planner", "Asking whether that's what happened.")
         if phase == "method_check":
-            return Step("Planner", "Asking which method you used.")
+            return Step("Planner", "Asking which of the matching mistakes you made.")
+        if phase == "intermediate_step":
+            return Step("Planner", "Asking to see one step of your working.")
+        if phase == "scaffold":
+            return Step("Planner", "Setting up a smaller warm-up question.")
         if phase == "choice":
             return Step("Planner", "Asking how you'd like to continue.")
         if p.get("attempt_number", 1) > 1:
@@ -96,6 +121,8 @@ def active_step(records: list[Version]) -> Step:
         return Step("Diagnoser", "Explaining what went wrong…")
     if last.kind == "classification":
         return Step("Diagnoser", "Explaining what went wrong…")
-    if last.kind in ("misconception", "strategy_plan", "reexplanation", "human_choice"):
+    if last.kind in ("confirmation", "intermediate_step", "method_choice"):
+        return Step("Diagnoser", "Working out what went wrong…")
+    if last.kind in ("misconception", "strategy_plan", "scaffold_pick", "reexplanation", "human_choice"):
         return Step("Tutor", "Writing a different explanation…")
     return Step("Evaluator", "Checking your answer…")     # expert_answer / attempt / unmapped

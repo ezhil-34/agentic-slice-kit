@@ -12,7 +12,7 @@ opinion. `classify` is still a real model call - it explains *why* in words,
 and is the only decider when no operator's prediction matches at all - but it
 is handed the code's own finding rather than starting blind.
 
-Two of the four operators - formula_sign_flip and factor_sign_flip - always
+Two of the five operators - formula_sign_flip and factor_sign_flip - always
 predict the identical wrong answer (both are "negate every correct root").
 That collision is deliberate: it is the concrete case where re-asking a
 question of the same shape teaches nothing, and the only honest move is to
@@ -26,11 +26,11 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 # ----------------------------------------------------------------- constants
-# Four fixed bug types - a deliberate, human-made judgement call, not
-# something classify invents. Three are real operators; the fourth
+# Five fixed bug types - a deliberate, human-made judgement call, not
+# something classify invents. Four are real operators; the fifth
 # ("unclassified") is the honest fallback when nothing else fits.
-ERROR_TYPES = ("formula_sign_flip", "formula_forgot_2a", "factor_sign_flip",
-               "factor_wrong_pair", "unclassified")
+ERROR_TYPES = ("formula_sign_flip", "formula_forgot_2a", "formula_discriminant_sign",
+               "factor_sign_flip", "factor_wrong_pair", "unclassified")
 
 # The three re-explanation strategies are likewise fixed by us in advance.
 # `reexplain` chooses among them; it does not invent new pedagogy on the fly.
@@ -51,6 +51,20 @@ REPEATS_BEFORE_PAUSE = 3
 ask the student directly. Counted from stored `classification` records,
 never from the kit's budget.attempt() counter - see README.md section 6."""
 
+ESCALATION_ROUNDS = 2
+"""How many scaffold questions one real question may cost before the ladder
+stops and hands the choice to the student (worked example / simpler / just
+show me). A separate counter from REPEATS_BEFORE_PAUSE: that one counts the
+same bug recurring, this one counts rounds of teaching that did not settle it."""
+
+# The words that mean "get me out of here", checked before ANY phase-specific
+# parsing so a stuck student is never trapped at a stage that forgot to handle
+# them. Compared after lower-casing and stripping punctuation.
+SKIP_WORDS = frozenset({"skip", "skip question", "skip this question"})
+REVEAL_WORDS = frozenset({"show me", "show me the answer", "show me the solution", "just show me",
+                          "idk", "i dont know", "i don't know", "reveal"})
+# Not a control word: it skips only the intermediate-step prompt, not the question.
+SKIP_STEP = "skip this step"
 # --------------------------------------------------------------- operators
 # method-tagged so the method-check question (schema.OPERATOR_METHOD) can
 # resolve a collision once the student says which one they used.
@@ -60,6 +74,8 @@ OPERATORS: list[dict] = [
                      "roots come out with the wrong sign."},
     {"id": "formula_forgot_2a", "method": "formula",
      "description": "Divides by a instead of 2a at the final step."},
+    {"id": "formula_discriminant_sign", "method": "formula",
+     "description": "Works the discriminant as b^2 + 4ac instead of b^2 - 4ac."},
     {"id": "factor_sign_flip", "method": "factorization",
      "description": "From a factor (x - p) = 0, writes x = -p and drops the "
                      "sign flip - same wrong numbers as formula_sign_flip."},
@@ -74,6 +90,7 @@ OPERATOR_METHOD: dict[str, str] = {op["id"]: op["method"] for op in OPERATORS}
 BUG_LABELS: dict[str, str] = {
     "formula_sign_flip": "sign errors in the quadratic formula",
     "formula_forgot_2a": "dividing by the wrong number at the end of the formula",
+    "formula_discriminant_sign": "getting the sign wrong inside the discriminant (b² + 4ac instead of b² − 4ac)",
     "factor_sign_flip": "sign errors when factoring",
     "factor_wrong_pair": "picking a factor pair that doesn't actually work",
     "unclassified": "a mistake we haven't pinned down yet",
@@ -82,6 +99,15 @@ BUG_LABELS: dict[str, str] = {
 
 def _discriminant(a: float, b: float, c: float) -> float:
     return b * b - 4 * a * c
+
+
+# What the "No real solution" box on the student page submits. A fixed phrase,
+# not free text, so flow.py can grade it by code instead of guessing at it.
+NO_SOLUTION = "no real solution"
+
+
+def has_real_roots(a: float, b: float, c: float) -> bool:
+    return _discriminant(a, b, c) >= 0
 
 
 def predict_operator(op_id: str, a: float, b: float, c: float) -> set[float] | None:
@@ -101,6 +127,11 @@ def predict_operator(op_id: str, a: float, b: float, c: float) -> set[float] | N
         if D < 0:
             return None
         return {round((-b + D ** 0.5) / a, 6), round((-b - D ** 0.5) / a, 6)}
+    if op_id == "formula_discriminant_sign":
+        wrong_D = b * b + 4 * a * c
+        if wrong_D < 0:
+            return None
+        return {round((-b + wrong_D ** 0.5) / (2 * a), 6), round((-b - wrong_D ** 0.5) / (2 * a), 6)}
     if op_id == "factor_wrong_pair":
         return None
     raise ValueError(f"unknown operator {op_id!r}")
@@ -127,7 +158,8 @@ def match_operators(a: float, b: float, c: float, correct_roots: list[float],
     actually typed, computed fresh from a/b/c every time - never assumed.
     Zero, one, or two-or-more (a collision) operators can match."""
     matched = [
-        op_id for op_id in ("formula_sign_flip", "factor_sign_flip", "formula_forgot_2a")
+        op_id for op_id in ("formula_sign_flip", "factor_sign_flip", "formula_forgot_2a",
+                            "formula_discriminant_sign")
         if (pred := predict_operator(op_id, a, b, c)) is not None
         and _set_match(student_roots, pred, tol)
     ]
@@ -145,7 +177,8 @@ def collisions(questions: list[dict] | None = None) -> list[tuple[str, str, str]
     question bank, never hardcoded. Diagnostic + used by tests to prove the
     collision this project is built around is real, not assumed."""
     qs = QUESTIONS if questions is None else questions
-    fixed_ops = ["formula_sign_flip", "formula_forgot_2a", "factor_sign_flip"]
+    fixed_ops = ["formula_sign_flip", "formula_forgot_2a", "formula_discriminant_sign",
+                 "factor_sign_flip"]
     hits: list[tuple[str, str, str]] = []
     for q in qs:
         preds = {op_id: predict_operator(op_id, q["a"], q["b"], q["c"]) for op_id in fixed_ops}
@@ -162,12 +195,22 @@ def collisions(questions: list[dict] | None = None) -> list[tuple[str, str, str]
 class ErrorClassification(BaseModel):
     """What `classify` produces. One of ERROR_TYPES, never a new label."""
 
-    error_type: Literal["formula_sign_flip", "formula_forgot_2a", "factor_sign_flip",
-                         "factor_wrong_pair", "unclassified"]
+    error_type: Literal["formula_sign_flip", "formula_forgot_2a", "formula_discriminant_sign",
+                         "factor_sign_flip", "factor_wrong_pair", "unclassified"]
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: str = Field(
         description="One sentence: what in the student's answer supports this label. "
                     "Surfaced back to the student per README.md refusal #3 - never guess silently.")
+
+
+class IntermediateValue(BaseModel):
+    """What the `extract` call produces: the ONE number a student's typed
+    working states as their discriminant, or null. Extraction only - it is never
+    asked whether the number is right; code compares it (see ladder.py)."""
+
+    value: float | None = Field(
+        description="The number the student says their discriminant (b^2 - 4ac, "
+                    "also written delta, D) came to, or null if the working gives none.")
 
 
 class ReExplanation(BaseModel):
@@ -252,8 +295,37 @@ BUG_INFO: dict[str, dict[str, str]] = {
         "what": "The two numbers picked don't multiply to c (and add to b), so the factors don't rebuild the equation.",
         "tip": "Check by expanding your brackets back out - you should land on the original equation.",
     },
+    "formula_discriminant_sign": {
+        "what": "Inside the square root the formula has b² − 4ac. Writing + 4ac gives a different number under the root.",
+        "tip": "Write b² and 4ac on separate lines, then subtract: b² − 4ac.",
+    },
     "unclassified": {
         "what": "A mistake that didn't match a known pattern.",
         "tip": "Substitute your answer back into the equation; if it doesn't give 0, it isn't a root.",
     },
 }
+
+
+# ------------------------------------------------------------- scaffold bank
+# Small, hand-verified questions used to re-teach a diagnosed mistake INSTEAD of
+# asking the same big question again. Fixed on purpose: a model-made "easier"
+# quadratic could carry a wrong discriminant or a stray second solution, and
+# teaching from a flawed problem is worse than not scaffolding. Every entry is
+# checked by tests/test_ladder.py (roots satisfy the equation, none repeats a
+# real question, each bug's predicted wrong answer differs from the right one).
+# Same shape as QUESTIONS, so the SAME operator match grades their answers.
+SCAFFOLDS: list[dict] = [
+    {"id": "s_formula_1", "method": "formula", "text": "x² − 6x + 8 = 0",
+     "a": 1, "b": -6, "c": 8, "roots": [2, 4]},
+    {"id": "s_formula_2", "method": "formula", "text": "x² + 4x + 3 = 0",
+     "a": 1, "b": 4, "c": 3, "roots": [-1, -3]},
+    {"id": "s_formula_3", "method": "formula", "text": "2x² − 5x + 2 = 0",
+     "a": 2, "b": -5, "c": 2, "roots": [2, 0.5]},
+    {"id": "s_factor_1", "method": "factorization", "text": "x² − 5x + 4 = 0",
+     "a": 1, "b": -5, "c": 4, "roots": [1, 4]},
+    {"id": "s_factor_2", "method": "factorization", "text": "x² + 6x + 8 = 0",
+     "a": 1, "b": 6, "c": 8, "roots": [-2, -4]},
+    {"id": "s_factor_3", "method": "factorization", "text": "x² − x − 6 = 0",
+     "a": 1, "b": -1, "c": -6, "roots": [3, -2]},
+]
+SCAFFOLD_BY_ID = {sq["id"]: sq for sq in SCAFFOLDS}

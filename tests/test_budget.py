@@ -8,15 +8,47 @@ start, not after it's too late. Crucially, it also checks these limits survive
 a restart — because a limit that lives only in memory and resets when the
 program restarts isn't a real limit.
 
-Runs entirely on stdlib sqlite3: no key, no network, no tokens.
+At the end of testing, it automatically generates a `budget_report.txt` file
+summarizing total token usage and call counts.
 """
 from __future__ import annotations
 
+from pathlib import Path
 import pytest
 
 from slice.budget import Budget, BudgetExceeded
 from slice.config import Settings
 from slice.store import Store
+
+# Global tracker for token usage and call counts across tests
+_TOKEN_CALLS: list[dict[str, float]] = []
+
+
+@pytest.fixture(autouse=True, scope="module")
+def export_budget_report():
+    yield
+    # Write summary report to budget_report.txt after all module tests finish
+    report_path = Path("test_reports/test_budget_report.txt")
+    report_path.parent.mkdir(exist_ok=True)
+    total_tokens = sum(c["tokens"] for c in _TOKEN_CALLS)
+    total_calls = len(_TOKEN_CALLS)
+
+    lines = [
+        "==================================================",
+        "             BUDGET TEST USAGE REPORT             ",
+        "==================================================",
+        f"Total Tokens Used  : {int(total_tokens)} tokens",
+        f"Total Token Calls  : {total_calls} calls",
+        "==================================================",
+        "Call Breakdown:",
+    ]
+    for idx, c in enumerate(_TOKEN_CALLS, 1):
+        lines.append(
+            f"  Call #{idx:02d}: {int(c['tokens'])} tokens recorded (Cumulative in run: {int(c['cumulative'])} tokens)"
+        )
+    lines.append("==================================================")
+
+    report_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def _settings(**overrides) -> Settings:
@@ -35,7 +67,18 @@ def _budget(tmp_path, **settings_kw):
     s = _settings(**settings_kw)
     store = Store(str(tmp_path / "b.db"))
     run_id = store.create_run("test")
-    return Budget(store, run_id, s), store, run_id
+    budget = Budget(store, run_id, s)
+
+    # Intercept record_tokens to track call counts and token usage
+    orig_record_tokens = budget.record_tokens
+
+    def record_tokens_logged(n: int) -> float:
+        res = orig_record_tokens(n)
+        _TOKEN_CALLS.append({"tokens": float(n), "cumulative": res})
+        return res
+
+    budget.record_tokens = record_tokens_logged
+    return budget, store, run_id
 
 
 # --------------------------------------------------------- per-step attempts

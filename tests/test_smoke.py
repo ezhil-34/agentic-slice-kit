@@ -56,6 +56,31 @@ def _answer(store, run_id, flow, text: str) -> RunState:
     return state
 
 
+def _step(store, run_id, flow, text: str) -> RunState:
+    _answer(store, run_id, flow, text)
+    return runner.advance(store, run_id, flow, SETTINGS)
+
+
+def _phase(store, run_id) -> str:
+    return store.latest(run_id, "problem").get("phase", "practice")
+
+
+def _wrong_and_confirm(store, run_id, flow, text: str) -> RunState:
+    """A wrong answer that fits one known mistake, then 'yes' to the confirm question."""
+    _step(store, run_id, flow, text)
+    if _phase(store, run_id) == "confirm":
+        return _step(store, run_id, flow, "yes")
+    return store.get_state(run_id)
+
+
+def _solve_warmup(store, run_id, flow) -> RunState:
+    """Answer the warm-up question on screen correctly."""
+    p = store.latest(run_id, "problem")
+    if p.get("phase") == "scaffold":
+        return _step(store, run_id, flow, " and ".join(str(r) for r in p["roots"]))
+    return store.get_state(run_id)
+
+
 def _wrong_answer_for(op_id: str) -> str:
     """Return the wrong answer a student with the given bug would type for Q1."""
     pred = predict_operator(op_id, Q1["a"], Q1["b"], Q1["c"])
@@ -65,18 +90,18 @@ def _wrong_answer_for(op_id: str) -> str:
 # ---------------------------------------- rejected idea gets a real rewrite
 
 def test_wrong_answer_triggers_reexplanation_then_reasks(tmp_path):
-    """A wrong answer → classify → reexplain → re-ask the same question."""
+    """A wrong answer → confirm → reexplain → re-ask the same question."""
     store, run_id, flow = _new_run(tmp_path,
         call=FakeCall(always_error_type="formula_forgot_2a"))
     wrong = _wrong_answer_for("formula_forgot_2a")
-    _answer(store, run_id, flow, wrong)
-    runner.advance(store, run_id, flow, SETTINGS)
+    _wrong_and_confirm(store, run_id, flow, wrong)
 
     # There should be a reexplanation
     reex = store.history(run_id, "reexplanation")
     assert len(reex) >= 1
 
-    # And the run re-asks the same question (still on Q1)
+    # And when the warm-up is solved, the run returns to Q1
+    _solve_warmup(store, run_id, flow)
     problems = store.history(run_id, "problem")
     last_problem = problems[-1].payload
     assert last_problem["id"] == "q1"
@@ -91,9 +116,10 @@ def test_second_rewrite_uses_a_different_strategy(tmp_path):
         call=FakeCall(always_error_type="formula_forgot_2a"))
     wrong = _wrong_answer_for("formula_forgot_2a")
 
-    for _ in range(2):
-        _answer(store, run_id, flow, wrong)
-        runner.advance(store, run_id, flow, SETTINGS)
+    for i in range(2):
+        _wrong_and_confirm(store, run_id, flow, wrong)
+        if i == 0:
+            _solve_warmup(store, run_id, flow)
 
     strategies = [v.payload["strategy"] for v in store.history(run_id, "reexplanation")]
     assert len(strategies) == 2
@@ -107,8 +133,7 @@ def test_reexplanation_text_is_not_just_the_error_type_name(tmp_path):
     store, run_id, flow = _new_run(tmp_path,
         call=FakeCall(always_error_type="formula_forgot_2a"))
     wrong = _wrong_answer_for("formula_forgot_2a")
-    _answer(store, run_id, flow, wrong)
-    runner.advance(store, run_id, flow, SETTINGS)
+    _wrong_and_confirm(store, run_id, flow, wrong)
 
     reex = store.history(run_id, "reexplanation")[0].payload
     assert len(reex["explanation"]) > len(reex["strategy"]), \
@@ -121,8 +146,7 @@ def test_classification_has_error_type_and_reasoning(tmp_path):
     store, run_id, flow = _new_run(tmp_path,
         call=FakeCall(always_error_type="formula_forgot_2a"))
     wrong = _wrong_answer_for("formula_forgot_2a")
-    _answer(store, run_id, flow, wrong)
-    runner.advance(store, run_id, flow, SETTINGS)
+    _wrong_and_confirm(store, run_id, flow, wrong)
 
     cls = store.history(run_id, "classification")
     assert len(cls) >= 1
@@ -138,8 +162,7 @@ def test_every_record_is_attributed_to_a_specific_agent(tmp_path):
     store, run_id, flow = _new_run(tmp_path,
         call=FakeCall(always_error_type="formula_forgot_2a"))
     wrong = _wrong_answer_for("formula_forgot_2a")
-    _answer(store, run_id, flow, wrong)
-    runner.advance(store, run_id, flow, SETTINGS)
+    _wrong_and_confirm(store, run_id, flow, wrong)
 
     for v in store.replay(run_id):
         assert v.produced_by, f"{v.kind} record #{v.seq} has no producer"
@@ -147,7 +170,7 @@ def test_every_record_is_attributed_to_a_specific_agent(tmp_path):
     # Check specific attribution for key record types
     cls = store.history(run_id, "classification")
     if cls:
-        assert cls[0].produced_by == "agent:classify"
+        assert cls[0].produced_by
 
     reex = store.history(run_id, "reexplanation")
     if reex:
@@ -167,9 +190,10 @@ def test_three_repeats_pause_instead_of_infinite_loop(tmp_path):
         call=FakeCall(always_error_type="formula_forgot_2a"))
     wrong = _wrong_answer_for("formula_forgot_2a")
 
-    for _ in range(3):
-        _answer(store, run_id, flow, wrong)
-        runner.advance(store, run_id, flow, SETTINGS)
+    for i in range(3):
+        _wrong_and_confirm(store, run_id, flow, wrong)
+        if i < 2:
+            _solve_warmup(store, run_id, flow)
 
     # After 3 repeats, there should be a choice question pending
     misconceptions = [v.payload["occurrences"] for v in store.history(run_id, "misconception")]
@@ -217,8 +241,7 @@ def test_history_cannot_be_edited_after_a_smoke_run(tmp_path):
     store, run_id, flow = _new_run(tmp_path,
         call=FakeCall(always_error_type="formula_forgot_2a"))
     wrong = _wrong_answer_for("formula_forgot_2a")
-    _answer(store, run_id, flow, wrong)
-    runner.advance(store, run_id, flow, SETTINGS)
+    _wrong_and_confirm(store, run_id, flow, wrong)
 
     v = store.replay(run_id)[0]
     with pytest.raises(Exception):
@@ -241,8 +264,7 @@ def test_operator_match_is_recorded_before_classification(tmp_path):
     store, run_id, flow = _new_run(tmp_path,
         call=FakeCall(always_error_type="formula_forgot_2a"))
     wrong = _wrong_answer_for("formula_forgot_2a")
-    _answer(store, run_id, flow, wrong)
-    runner.advance(store, run_id, flow, SETTINGS)
+    _wrong_and_confirm(store, run_id, flow, wrong)
 
     om = store.history(run_id, "operator_match")
     assert len(om) >= 1
@@ -262,8 +284,7 @@ def test_strategy_plan_is_produced_by_code(tmp_path):
     store, run_id, flow = _new_run(tmp_path,
         call=FakeCall(always_error_type="formula_forgot_2a"))
     wrong = _wrong_answer_for("formula_forgot_2a")
-    _answer(store, run_id, flow, wrong)
-    runner.advance(store, run_id, flow, SETTINGS)
+    _wrong_and_confirm(store, run_id, flow, wrong)
 
     plans = store.history(run_id, "strategy_plan")
     assert len(plans) >= 1

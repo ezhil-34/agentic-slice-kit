@@ -50,6 +50,31 @@ def _finish_question(store, run_id, flow, question: dict) -> RunState:
     return runner.advance(store, run_id, flow, SETTINGS)
 
 
+def _step(store, run_id, flow, text: str) -> RunState:
+    """Answer whatever is open, then let the run process it."""
+    _answer(store, run_id, flow, text)
+    return runner.advance(store, run_id, flow, SETTINGS)
+
+
+def _phase(store, run_id) -> str:
+    return store.latest(run_id, "problem").get("phase", "practice")
+
+
+def _wrong_and_confirm(store, run_id, flow, text: str) -> RunState:
+    """A wrong answer that fits exactly one known mistake, then "yes" to the
+    "Looks like X - is that right?" question."""
+    _step(store, run_id, flow, text)
+    assert _phase(store, run_id) == "confirm"
+    return _step(store, run_id, flow, "yes")
+
+
+def _solve_warmup(store, run_id, flow) -> RunState:
+    """Answer the warm-up question on screen correctly."""
+    p = store.latest(run_id, "problem")
+    assert p["phase"] == "scaffold"
+    return _step(store, run_id, flow, " and ".join(str(r) for r in p["roots"]))
+
+
 # --------------------------------------------------------- operator layer
 
 def test_sign_flip_operators_collide_on_every_question():
@@ -100,7 +125,10 @@ def test_collision_asks_which_method_instead_of_calling_classify(tmp_path):
     assert set(om["matched_operators"]) == {"formula_sign_flip", "factor_sign_flip"}
 
     q = callback.pending(store, run_id)[-1]
-    assert "factorization" in q.question.lower() and "quadratic formula" in q.question.lower()
+    assert "more than one kind of mistake" in q.question.lower()
+    prob = store.latest(run_id, "problem")
+    assert prob["phase"] == "method_check"
+    assert set(prob["candidates"]) == {"formula_sign_flip", "factor_sign_flip"}
 
 
 @pytest.mark.parametrize("method_answer,expected_operator", [
@@ -127,21 +155,22 @@ def test_method_check_resolves_to_the_matching_operator(tmp_path, method_answer,
     assert misc["occurrences"] == 1
 
 
-def test_unanswered_method_check_defaults_without_getting_stuck(tmp_path):
-    """An expired/empty answer to the method-check question must still let
-    the run continue - same "nobody knew is a legitimate finding" principle
-    slice/callback.py applies everywhere else."""
+def test_unanswered_method_check_asks_for_working_instead_of_guessing(tmp_path):
+    """An expired/empty answer to the which-mistake question must still let the
+    run continue - "nobody knew" is a legitimate finding (slice/callback.py) -
+    but it is NOT resolved to the first candidate: nothing was confirmed, so the
+    ladder moves on to asking for one step of working."""
     store, run_id, flow = _new_run(tmp_path)
     negated = " and ".join(str(-r) for r in Q1["roots"])
     _answer(store, run_id, flow, negated)
     runner.advance(store, run_id, flow, SETTINGS)
-    _answer(store, run_id, flow, "")                       # no method named
+    _answer(store, run_id, flow, "")                       # nobody answered
     state = runner.advance(store, run_id, flow, SETTINGS)
 
     choice = store.history(run_id, "method_choice")[-1].payload
-    assert choice["defaulted"] is True
-    assert choice["resolved_operator"] in ("formula_sign_flip", "factor_sign_flip")
-    assert state in (RunState.AWAITING_EXPERT, RunState.PROBING, RunState.COMPLETE)
+    assert choice["defaulted"] is True and choice["resolved_operator"] is None
+    assert store.history(run_id, "classification") == []
+    assert state is RunState.AWAITING_EXPERT and _phase(store, run_id) == "intermediate_step"
 
 
 # ------------------------------------------------------ the ordinary path
@@ -158,15 +187,17 @@ def test_happy_path_completes_with_zero_model_calls(tmp_path):
 
 
 def test_three_repeats_trigger_pause_and_switch_strategy(tmp_path):
-    """The single-operator (non-collision) path: same bug three times ->
-    strategy changes each retry, then a pause with a direct question."""
+    """The single-operator (non-collision) path: same bug three times, each one
+    confirmed by the student -> a warm-up + a new explanation each time, then a
+    pause with a direct question instead of a third round."""
     store, run_id, flow = _new_run(tmp_path, call=FakeCall(always_error_type="formula_forgot_2a"))
     forgot_2a = predict_operator("formula_forgot_2a", Q1["a"], Q1["b"], Q1["c"])
     wrong_text = " and ".join(str(x) for x in forgot_2a)
 
-    for _ in range(3):
-        _answer(store, run_id, flow, wrong_text)
-        runner.advance(store, run_id, flow, SETTINGS)
+    for i in range(3):
+        _wrong_and_confirm(store, run_id, flow, wrong_text)
+        if i < 2:
+            _solve_warmup(store, run_id, flow)              # back to Q1, a fresh attempt
 
     misconceptions = [v.payload["occurrences"] for v in store.history(run_id, "misconception")]
     assert misconceptions == [1, 2, 3]
@@ -175,7 +206,8 @@ def test_three_repeats_trigger_pause_and_switch_strategy(tmp_path):
     assert strategies[0] != strategies[1], "reexplain must not repeat a tried strategy"
 
     q = callback.pending(store, run_id)[-1]
-    assert "worked example" in q.question.lower() or "simpler" in q.question.lower()
+    assert _phase(store, run_id) == "choice"
+    assert "worked example" in q.question.lower() and "simpler" in q.question.lower()
 
 
 def test_history_cannot_be_rewritten(tmp_path):
@@ -292,9 +324,10 @@ def test_planner_never_returns_an_empty_list_and_includes_real_world_example():
 def test_a_repeat_on_a_slower_alternate_method_keeps_the_method_and_changes_the_style(tmp_path):
     """factoring student, Q1: three ways of explaining, never the formula."""
     store, run_id, flow = _new_run(tmp_path, call=FakeCall(always_error_type="factor_wrong_pair"))
-    for _ in range(2):
-        _answer(store, run_id, flow, "999 and -999")
-        runner.advance(store, run_id, flow, SETTINGS)
+    for i in range(2):
+        _wrong_and_confirm(store, run_id, flow, "999 and -999")
+        if i == 0:
+            _solve_warmup(store, run_id, flow)
     strategies = [v.payload["strategy"] for v in store.history(run_id, "reexplanation")]
     assert len(strategies) == 2 and strategies[0] != strategies[1]
     assert "alternate_method" not in strategies
@@ -307,9 +340,10 @@ def test_a_repeat_on_a_quicker_alternate_method_does_switch(tmp_path):
     """formula student, Q1: factoring is quicker, so the second re-teach uses it."""
     store, run_id, flow = _new_run(tmp_path, call=FakeCall(always_error_type="formula_forgot_2a"))
     wrong = " and ".join(str(x) for x in predict_operator("formula_forgot_2a", Q1["a"], Q1["b"], Q1["c"]))
-    for _ in range(2):
-        _answer(store, run_id, flow, wrong)
-        runner.advance(store, run_id, flow, SETTINGS)
+    for i in range(2):
+        _wrong_and_confirm(store, run_id, flow, wrong)
+        if i == 0:
+            _solve_warmup(store, run_id, flow)
     strategies = [v.payload["strategy"] for v in store.history(run_id, "reexplanation")]
     assert strategies == ["worked_example", "alternate_method"]
 
@@ -324,8 +358,7 @@ def test_a_model_choice_outside_the_offered_list_is_flagged_not_rewritten(tmp_pa
             return super().__call__(**kw)
 
     store, run_id, flow = _new_run(tmp_path, call=Stubborn(always_error_type="factor_wrong_pair"))
-    _answer(store, run_id, flow, "999 and -999")
-    runner.advance(store, run_id, flow, SETTINGS)
+    _wrong_and_confirm(store, run_id, flow, "999 and -999")
     re = store.history(run_id, "reexplanation")[-1].payload
     assert re["strategy"] == "alternate_method" and re["off_plan"] is True
 
@@ -358,4 +391,4 @@ def test_collision_trail_says_it_is_asking_about_the_method(tmp_path):
     runner.advance(store, run_id, flow, SETTINGS)
     steps = steps_from_records(store.replay(run_id))
     assert [s.agent for s in steps] == ["Evaluator", "Diagnoser", "Planner"]
-    assert "more than one kind of mistake" in steps[1].doing and "which method" in steps[2].doing
+    assert "more than one kind of mistake" in steps[1].doing and "which of the matching" in steps[2].doing

@@ -25,8 +25,8 @@ Without JavaScript the same forms still post normally (the answer redirects to
 Security notes: a session belongs to the student who started it (a signed
 login cookie is checked on every session URL); run ids are validated before
 they touch the database or the markup; PINs are hashed; every DB connection is
-closed; answers are length-limited and must contain a number when a number is
-what's being asked for.
+closed; answers are length-limited, and the practice form's two root boxes
+accept numbers only (checked in the browser and again on the server).
 """
 from __future__ import annotations
 
@@ -56,8 +56,9 @@ from slice.store import Store
 from demo.tracker import progress, students, trail
 from demo.tracker.custom import check_consistency, custom_check_messages
 from demo.tracker.flow import build_flow, start_run
-from demo.tracker.schema import (BUG_INFO, BUG_LABELS, ERROR_TYPES, QUESTIONS, STRATEGY_LABELS,
-                                 CustomCheck)
+from demo.tracker.ladder import control_word
+from demo.tracker.schema import (BUG_INFO, BUG_LABELS, ERROR_TYPES, NO_SOLUTION, OPERATOR_METHOD,
+                                 QUESTIONS, STRATEGY_LABELS, CustomCheck)
 from web import ui
 from web.ui import esc
 
@@ -379,12 +380,40 @@ def new_session(request: Request):
 # ------------------------------------------------------------------ session
 
 _ERRORS = {
-    "empty": "Type an answer first.",
+    "empty": "Fill in both boxes, or tick “No real solution”.",
     "nodigit": "Enter your answers as numbers, e.g. 2 and 3 (fractions like 1/2 are fine).",
+    "needboth": "Fill in both boxes, or tick “No real solution”.",
+    "badnum": "Numbers only, please - e.g. 2, -3, 0.5 or 1/2.",
     "long": f"Keep it under {MAX_ANSWER_CHARS} characters.",
     "busy": "Still working on your last answer - one moment.",
     "done": "That question was already answered.",
 }
+
+
+# One root as typed into a box: an integer, a decimal, or a simple fraction.
+_ROOT_BOX = re.compile(r"-?\d+(?:\.\d+)?(?:/[1-9]\d*)?")
+_ROOT_BOX_MAX = 20
+
+
+def _compose_answer(phase: str, answer: str, root1: str | None, root2: str | None,
+                    no_solution: str) -> tuple[str, str | None]:
+    """Turn the practice form's fields into the one answer string the flow
+    grades: "<x1> and <x2>", or NO_SOLUTION. Returns (text, error code).
+
+    A post with no root fields at all (a plain `answer`, as scripts and older
+    clients send) passes through untouched to _validate_answer."""
+    if control_word(answer):            # "skip" / "show me" work at every stage, exactly
+        return answer.strip(), None
+    if phase not in ("practice", "scaffold") or (root1 is None and root2 is None and not no_solution):
+        return answer, None
+    if no_solution:                     # the browser omits the (greyed-out) root boxes
+        return NO_SOLUTION, None
+    r1, r2 = (root1 or "").strip(), (root2 or "").strip()
+    if not (r1 and r2):
+        return "", "needboth"
+    if not all(len(r) <= _ROOT_BOX_MAX and _ROOT_BOX.fullmatch(r) for r in (r1, r2)):
+        return "", "badnum"
+    return f"{r1} and {r2}", None
 
 
 def _validate_answer(phase: str, text: str) -> str | None:
@@ -396,7 +425,8 @@ def _validate_answer(phase: str, text: str) -> str | None:
         return "empty"
     if len(t) > MAX_ANSWER_CHARS:
         return "long"
-    if phase == "practice" and not re.search(r"\d", t):
+    if (phase in ("practice", "scaffold") and t.lower() != NO_SOLUTION and not control_word(t)
+            and not re.search(r"\d", t)):
         return "nodigit"
     return None
 
@@ -436,7 +466,9 @@ def session_page(request: Request, run_id: str, play: str = "", e: str = ""):
 
 
 @app.post("/session/{run_id}/answer")
-def submit_answer(request: Request, run_id: str, answer: str = Form("")):
+def submit_answer(request: Request, run_id: str, answer: str = Form(""),
+                  root1: str | None = Form(None), root2: str | None = Form(None),
+                  no_solution: str = Form("")):
     wants_json = request.headers.get("x-requested-with") == "fetch"
 
     def reject(code: str, status: int = 422):
@@ -454,7 +486,8 @@ def submit_answer(request: Request, run_id: str, answer: str = Form("")):
         if not open_qs:
             return reject("done", 409)
         phase = (store.latest(run_id, "problem") or {}).get("phase", "practice")
-        problem = _validate_answer(phase, answer)
+        answer, problem = _compose_answer(phase, answer, root1, root2, no_solution)
+        problem = problem or _validate_answer(phase, answer)
         if problem:
             return reject(problem)
         callback.answer(store, open_qs[-1].id, answer.strip(), who="student")
@@ -574,6 +607,14 @@ def _practice_page(store: Store, run_id: str, student: str | None, error: str = 
         tries = just["attempt_number"]
         banner = (f'<p class="banner ok"><b>✓ Correct!</b> Question {_q_num(just["question_id"])} solved'
                   f'{" first time" if tries == 1 else f" on attempt {tries}"}.</p>')
+    if phase == "practice" and any(v.kind == "scaffold_attempt" and v.payload["correct"] for v in turn):
+        banner += '<p class="banner ok"><b>✓ Warm-up done.</b> Now back to the real question.</p>'
+    left = next((v for v in turn if v.kind in ("skipped", "reviewed")), None)
+    if left:
+        n = _q_num(left.payload["question_id"])
+        banner += (f'<p class="banner info"><b>Skipped</b> question {n}.</p>' if left.kind == "skipped"
+                   else f'<p class="banner info"><b>The answer to question {n}:</b> '
+                        f'{esc(left.payload["solution"])}</p>')
     if error:
         banner += f'<p class="banner err" role="alert">{esc(error)}</p>'
 
@@ -589,44 +630,82 @@ def _practice_page(store: Store, run_id: str, student: str | None, error: str = 
     n_try = outcomes[qid]["attempts"] + 1
     pill = (f'<span class="pill orange">Attempt {n_try}</span>' if n_try > 1
             else '<span class="pill blue">First attempt</span>')
+    if prob.get("scaffold_id"):
+        pill = '<span class="pill blue">Warm-up</span>'
     action = f"/session/{quote(run_id, safe='')}/answer"
+    equation = prob.get("text") or spec["text"]      # a warm-up shows ITS equation, not the real one
 
-    if phase == "method_check":
-        options = [("factorization", "Factorization", "I split it into brackets"),
-                   ("the quadratic formula", "Quadratic formula", "I used −b ± √(b² − 4ac) over 2a"),
-                   ("not sure", "Not sure", "I can't remember")]
+    # "Skip" and "Show me" are on every page, whatever the stage: a stuck student
+    # is never trapped. Each posts a fixed word the server checks first.
+    escape = """<div class="escape">
+              <button class="link-btn" type="submit" name="answer" value="skip" formnovalidate>Skip question</button>
+              <button class="link-btn" type="submit" name="answer" value="show me" formnovalidate>Show me the answer</button>
+            </div>"""
+
+    def choice_form(options: list[tuple[str, str, str]], lead: str = "") -> str:
+        cols = "choices three" if len(options) == 3 else "choices"
+        return f"""
+          {lead}
+          <p class="ask">{esc(ask)}</p>
+          <form id="answer-form" method="post" action="{action}">
+            <div class="{cols}">{"".join(
+                f'<button class="choice" type="submit" name="answer" value="{esc(v)}"><b>{esc(t)}</b><span>{esc(d)}</span></button>'
+                for v, t, d in options)}</div>
+            <p class="field-error" id="field-error" role="alert"></p>
+            {escape}
+          </form>"""
+
+    if phase == "confirm":
+        interaction = choice_form([("yes", "Yes, that's it", "That is what I did"),
+                                   ("no", "No, something else", "That wasn't it")], history)
+    elif phase == "method_check":
+        how = {"formula": "Quadratic formula", "factorization": "Factoring"}
+        options = [(op, BUG_LABELS.get(op, op).capitalize(), how.get(OPERATOR_METHOD.get(op), ""))
+                   for op in prob.get("candidates", [])]
+        options.append(("other", "Something else", "None of these"))
+        interaction = choice_form(options, history)
+    elif phase == "choice":
+        interaction = choice_form([
+            ("worked example", "Show me a worked example", "Walk through this exact equation, step by step"),
+            ("simpler problem", "Try a simpler problem first", "Rebuild the skill on an easier equation"),
+            ("show me", "Just show me the answer", "See the full solution and move on")], history + tutor)
+    elif phase == "intermediate_step":
         interaction = f"""
+          <p class="hint">Type it however you like - for example <code>Δ = 16 − 32 = −16</code>,
+            or <code>−2 and −3</code>.</p>
           {history}
           <p class="ask">{esc(ask)}</p>
-          <form id="answer-form" method="post" action="{action}">
-            <div class="choices three">{"".join(
-                f'<button class="choice" type="submit" name="answer" value="{esc(v)}"><b>{esc(t)}</b><span>{esc(d)}</span></button>'
-                for v, t, d in options)}</div>
-            <p class="field-error" id="field-error" role="alert"></p>
-          </form>"""
-    elif phase == "choice":
-        options = [("worked example", "Show me a worked example", "Walk through this exact equation, step by step"),
-                   ("simpler problem", "Try a simpler problem first", "Rebuild the skill on an easier equation")]
-        interaction = f"""
-          {history}{tutor}
-          <p class="ask">{esc(ask)}</p>
-          <form id="answer-form" method="post" action="{action}">
-            <div class="choices">{"".join(
-                f'<button class="choice" type="submit" name="answer" value="{esc(v)}"><b>{esc(t)}</b><span>{esc(d)}</span></button>'
-                for v, t, d in options)}</div>
-            <p class="field-error" id="field-error" role="alert"></p>
-          </form>"""
-    else:
-        interaction = f"""
-          <p class="hint">Find both values of x, e.g. <code>2 and 3</code>. Fractions like 1/2 are fine.</p>
-          {history}{tutor}
           <form id="answer-form" method="post" action="{action}" novalidate>
             <div class="answer">
-              <input type="text" name="answer" placeholder="Your answer, e.g. 2 and 3" autocomplete="off" autofocus
-                     maxlength="{MAX_ANSWER_CHARS}" required aria-label="Your answer" aria-describedby="field-error">
-              <button class="btn" type="submit">Check answer</button>
+              <input type="text" name="answer" placeholder="Your working" autocomplete="off" autofocus
+                     maxlength="{MAX_ANSWER_CHARS}" aria-label="Your working" aria-describedby="field-error">
+              <button class="btn" type="submit">Send</button>
             </div>
             <p class="field-error" id="field-error" role="alert"></p>
+            <div class="escape">
+              <button class="link-btn" type="submit" name="answer" value="skip this step" formnovalidate>Skip this step</button>
+              <button class="link-btn" type="submit" name="answer" value="skip" formnovalidate>Skip question</button>
+              <button class="link-btn" type="submit" name="answer" value="show me" formnovalidate>Show me the answer</button>
+            </div>
+          </form>"""
+    else:                                               # practice, or a scaffold warm-up
+        lead = ("A smaller one first, to build up to the real question. " if phase == "scaffold" else "")
+        interaction = f"""
+          <p class="hint">{lead}Find both values of x. If they are the same, type it in both boxes.
+            Numbers only - fractions like 1/2 are fine.</p>
+          {history}{tutor}
+          <form id="answer-form" method="post" action="{action}" novalidate>
+            <div class="roots">
+              <label>x₁<input type="text" name="root1" placeholder="e.g. 2" autocomplete="off" autofocus
+                     maxlength="{_ROOT_BOX_MAX}" aria-describedby="field-error"></label>
+              <label>x₂<input type="text" name="root2" placeholder="e.g. 3" autocomplete="off"
+                     maxlength="{_ROOT_BOX_MAX}" aria-describedby="field-error"></label>
+            </div>
+            <label class="none-box"><input type="checkbox" name="no_solution" value="1">
+              <span>No real solution</span></label>
+            <div class="answer"><button class="btn" type="submit">Check answer</button></div>
+            <p class="field-error" id="field-error" role="alert"></p>
+            {escape}
           </form>"""
 
     body = f"""
@@ -634,7 +713,7 @@ def _practice_page(store: Store, run_id: str, student: str | None, error: str = 
       <section class="card" aria-labelledby="qtitle">
         <div class="q-meta"><span class="q-num" id="qtitle">Question {q_num} of {len(_Q_ORDER)}</span>{pill}</div>
         {banner}{greeting}
-        <div class="equation" aria-label="Equation">{esc(spec["text"])} </div>
+        <div class="equation" aria-label="Equation">{esc(equation)} </div>
         {interaction}
         <div class="said" id="said" hidden><span>You answered</span><code></code></div>
       </section>
@@ -655,10 +734,17 @@ def _busy_page(store: Store, run_id: str, student: str | None) -> HTMLResponse:
     qid = turn_attempt["question_id"] if turn_attempt else (store.latest(run_id, "problem") or {}).get("id")
     outcomes = progress.question_outcomes(store, run_id)
     tiles = [progress.tile_status(outcomes[q], q == qid) for q in _Q_ORDER]
+    # The equation the answered question was about, from the "problem" record that
+    # was on screen when the answer arrived (a follow-up question - confirm, show a
+    # step - names no equation in its own text, but its record carries it).
+    last_ans = max((i for i, v in enumerate(records) if v.kind == "expert_answer"), default=-1)
+    on_screen = next((v.payload for v in reversed(records[:max(last_ans, 0)]) if v.kind == "problem"), {})
+    equation = on_screen.get("text") or (_QBY.get(on_screen.get("id")) or {}).get("text")
     if shown.startswith("Solve for x: "):
         main = f'<div class="equation">{esc(shown[len("Solve for x: "):])}</div>'
     else:
-        main = f'<p class="ask">{esc(shown or "Your answer")}</p>'
+        main = ((f'<div class="equation">{esc(equation)}</div>' if equation else "")
+                + f'<p class="ask">{esc(shown or "Your answer")}</p>')
     body = f"""
       {ui.stepper(tiles, _q_num(qid))}
       <section class="card">
@@ -718,12 +804,19 @@ def _complete_body(store: Store, run_id: str) -> str:
     if not bugs:
         bugs = ('<div class="card empty"><b>A clean run</b>No mistakes to work through this session.</div>')
     tiles = [progress.tile_status(rs["outcomes"][q]) for q in _Q_ORDER]
+    parts = [f'{rs[k]} {word}' for k, word in (("skipped", "skipped"), ("revealed", "shown the answer"))
+             if rs[k]]
+    left_out = f' ({", ".join(parts)}.)' if parts else ""
+    seen = store.history(run_id, "reviewed")
+    shown = ('<div class="card tight" style="text-align:left"><b>Answers you asked to see</b><ul>' + "".join(
+        f'<li class="small">{esc(r.payload["solution"])}</li>' for r in seen) + '</ul></div>') if seen else ""
     return f"""
       {ui.stepper(tiles, None)}
       <section class="card" style="text-align:center">
         <p class="big-check">🎉</p>
         <h1>Session complete</h1>
-        <p class="muted">You solved {rs["solved"]} of {len(_Q_ORDER)} questions in {rs["attempts"]} attempts.</p>
+        <p class="muted">You solved {rs["solved"]} of {len(_Q_ORDER)} questions in {rs["attempts"]} attempts.{left_out}</p>
+        {shown}
         <div class="stats" style="text-align:left;margin-top:1rem">
           <div class="stat">{ui.ring(mastery)}<div class="l">mastery<br><span class="small">correct ÷ all attempts</span></div></div>
           <div class="stat"><div class="n {ui.tone(first_pct)}">{rs["first_try"]}</div><div class="l">solved on the first try</div></div>
@@ -767,7 +860,7 @@ def _profile_body(student_id: str, rep: dict) -> str:
         bug_html = '<div class="card empty"><b>Nothing here yet</b>Answer a few questions and your misconceptions will appear here.</div>'
 
     tiles = "".join(
-        f'<li class="tile {t}" title="Question {i + 1}: {"solved first try" if t == "green" else "solved after retries" if t == "orange" else "not yet"}">'
+        f'<li class="tile {t}" title="Question {i + 1}: {"solved first try" if t == "green" else "solved after retries" if t == "orange" else "skipped or shown" if t == "skipped" else "not yet"}">'
         f'<span aria-hidden="true">{"✓" if t == "green" else i + 1}</span></li>'
         for i, t in enumerate(rep["grid"]))
     def _sess_row(s: dict) -> str:

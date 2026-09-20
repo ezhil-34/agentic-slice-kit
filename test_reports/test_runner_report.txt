@@ -1,0 +1,53 @@
+================================================================================
+TEST REPORT: tests/test_runner.py
+"Does the control flow behave correctly, with no model involved?"
+================================================================================
+
+SUMMARY:
+- Target Component : slice/runner.py (Orchestration spine & state transition runner)
+- Total Tests      : 14 passed out of 14
+- Status           : ALL PASSED (100%)
+
+PURPOSE & OVERVIEW:
+This test file verifies pure orchestration logic using fake step handlers (no LLMs 
+or network involved). It validates state transition rules, progress detection, budget 
+exhaustion handling, missing handler protection, and clean terminal state transitions.
+
+--------------------------------------------------------------------------------
+TEST FUNCTION BREAKDOWN:
+--------------------------------------------------------------------------------
+
+1. test_normal_flow_drafting_to_complete
+   - Marches run from DRAFTING -> GATING -> COMPLETE cleanly in a single advance() call.
+
+2. test_pause_leaves_run_suspended
+   - Transitioning to AWAITING_EXPERT stops advance() immediately and leaves state suspended.
+
+3. test_resumed_run_continues
+   - After answering a pending question, advance() resumes execution from the updated state.
+
+4. test_budget_exceeded_brings_run_to_failed_state
+   - If a step raises BudgetExceeded, advance() catches it, sets state to FAILED, and appends error record.
+
+5. test_no_progress_detection_triggers_failed
+   - If a step returns the exact same active state without writing any version or changing state, 
+     advance() detects no-progress loop and transitions to FAILED.
+
+6. test_missing_handler_triggers_failed
+   - If flow definition lacks a handler for the current state, advance() sets state to FAILED.
+
+7. test_max_steps_prevents_infinite_loops
+   - Respects max_steps limit to cut off runaway execution steps.
+
+8-12. Model Error Variants (test_model_error_triggers_failed, test_pool_exhausted_triggers_failed, 
+      test_cap_exhausted_triggers_failed, etc.)
+   - Verifies handling of LLM model failures (e.g. ModelError, PoolExhausted, CapExhausted), 
+     ensuring they cleanly transition run state to FAILED and write failure diagnostic records.
+
+13. test_terminal_state_is_a_no_op
+    - Calling advance() on an already COMPLETE or FAILED run returns immediately without executing.
+
+14. test_unanswered_question_prevents_advance
+    - Calling advance() while a question is open keeps state in AWAITING_EXPERT and returns NEEDS_INPUT.
+
+================================================================================

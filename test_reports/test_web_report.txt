@@ -1,0 +1,32 @@
+================================================================================
+TEST REPORT: tests/test_web.py
+"Does the HTTP API & web UI work?"
+================================================================================
+
+SUMMARY:
+- Target Component : demo/web/ & demo/web/app.py (FastAPI application & web interface)
+- Total Tests      : 66 passed out of 66
+- Status           : ALL PASSED (100%)
+
+PURPOSE & OVERVIEW:
+This test file validates the FastAPI web application endpoints, session management, 
+question answering HTTP routes, run listing, replay view, and human-in-the-loop 
+form submissions using FastAPI TestClient.
+
+--------------------------------------------------------------------------------
+TEST FUNCTION BREAKDOWN:
+--------------------------------------------------------------------------------
+
+1-15. Run Management Endpoints (test_create_run_endpoint, test_list_runs_endpoint, 
+      test_get_run_state_endpoint, test_replay_endpoint, etc.)
+   - Tests HTTP POST /api/runs, GET /api/runs, GET /api/runs/{id}/replay.
+
+16-40. Question & Interaction Endpoints (test_pending_questions_endpoint, 
+       test_answer_question_endpoint, test_double_answer_http_400, etc.)
+   - Tests HTTP GET /api/questions/pending, POST /api/questions/{id}/answer.
+
+41-66. UI & HTML Rendering Routes (test_index_page_200, test_student_view_200, 
+       test_expert_view_200, test_static_assets_served, etc.)
+   - Tests serving HTML frontend pages and static JavaScript/CSS assets.
+
+================================================================================

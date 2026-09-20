@@ -91,6 +91,15 @@ input:focus{border-color:var(--blue);outline:none;box-shadow:0 0 0 4px var(--blu
 .answer{display:flex;gap:.6rem;margin-top:1rem}
 .answer input{flex:1}
 .field-error{color:var(--red);font-size:.88rem;margin:.5rem 0 0;min-height:1.2em}
+.escape{display:flex;gap:.5rem;flex-wrap:wrap;margin-top:.9rem}
+.roots{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-top:1rem}
+.roots label{display:flex;flex-direction:column;gap:.3rem;font-weight:600;font-size:.9rem;color:var(--muted)}
+.roots input:disabled{opacity:.45;cursor:not-allowed}
+.none-box{display:flex;align-items:center;gap:.6rem;margin-top:.8rem;padding:.7rem .9rem;border-radius:11px;
+ border:1.5px solid var(--line);cursor:pointer;font-weight:600;font-size:.92rem}
+.none-box:hover{background:var(--soft)}
+.none-box:has(input:checked){border-color:var(--blue);background:var(--blue-bg);color:var(--blue)}
+.none-box input{width:1.1rem;height:1.1rem;margin:0}
 
 /* ---------- banners */
 .banner{border-radius:11px;padding:.65rem .9rem;font-size:.92rem;margin:0 0 1rem;display:flex;gap:.55rem;align-items:flex-start}
@@ -106,6 +115,7 @@ input:focus{border-color:var(--blue);outline:none;box-shadow:0 0 0 4px var(--blu
  background:var(--soft);color:var(--muted);border:1.5px solid transparent}
 .tile.green{background:var(--green-bg);color:var(--green);border-color:var(--green)}
 .tile.orange{background:var(--orange-bg);color:var(--orange);border-color:var(--orange)}
+.tile.skipped{background:transparent;color:var(--muted);border:1.5px dashed var(--muted)}
 .tile.current{background:var(--blue-bg);color:var(--blue);border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-bg)}
 .tile.current.retry{border-color:var(--orange);color:var(--orange);background:var(--orange-bg);box-shadow:0 0 0 3px var(--orange-bg)}
 .legend{display:flex;gap:1rem;flex-wrap:wrap;margin:.55rem 0 0;font-size:.78rem;color:var(--muted)}
@@ -280,6 +290,7 @@ def stepper(tiles: list[str], current: int | None, retry: bool = False) -> str:
     for i, t in enumerate(tiles):
         label = {"green": f"Question {i+1}: solved first try",
                  "orange": f"Question {i+1}: solved after retries",
+                 "skipped": f"Question {i+1}: skipped, or the answer was shown",
                  "current": f"Question {i+1}: you are here",
                  "todo": f"Question {i+1}: not yet"}[t]
         mark = "✓" if t == "green" else str(i + 1)
@@ -392,10 +403,44 @@ SESSION_JS = """
 
   if (form) {
     const input = form.querySelector('input[name=answer]');
+    const r1 = form.querySelector('input[name=root1]'), r2 = form.querySelector('input[name=root2]');
+    const none = form.querySelector('input[name=no_solution]');
+    const NUM = /^-?\\d+(\\.\\d+)?(\\/[1-9]\\d*)?$/;      // same rule the server applies
+    if (r1 && r2 && none) {
+      // The two root boxes take numbers only: drop any other character as it is typed.
+      [r1, r2].forEach(el => el.addEventListener('input', () => {
+        el.value = el.value.replace(/[^0-9./-]/g, '');
+        err.textContent = '';
+      }));
+      // "No real solution" replaces the two boxes, so grey them out while it is ticked.
+      none.addEventListener('change', () => {
+        [r1, r2].forEach(el => { el.disabled = none.checked; if (none.checked) el.value = ''; });
+        err.textContent = '';
+      });
+    }
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const val = input ? input.value.trim() : (e.submitter ? e.submitter.value : '');
-      if (input) {
+      let val = input ? input.value.trim() : (e.submitter ? e.submitter.value : '');
+      // "Skip question" / "Show me" / "Skip this step" post a fixed word: never validate them as numbers.
+      const ctrl = (e.submitter && e.submitter.name === 'answer' && (input || r1)) ? e.submitter : null;
+      if (ctrl) {
+        val = ctrl.value;
+      } else if (r1 && r2 && none) {
+        if (none.checked) {
+          val = 'no real solution';
+        } else {
+          const a = r1.value.trim(), b = r2.value.trim();
+          if (!a || !b) {
+            err.textContent = 'Fill in both boxes, or tick \\u201cNo real solution\\u201d.';
+            (a ? r2 : r1).focus(); return;
+          }
+          if (!NUM.test(a) || !NUM.test(b)) {
+            err.textContent = 'Numbers only, please - e.g. 2, -3, 0.5 or 1/2.';
+            (NUM.test(a) ? r2 : r1).focus(); return;
+          }
+          val = a + ' and ' + b;
+        }
+      } else if (input) {
         if (!val) { err.textContent = 'Type an answer first.'; input.focus(); return; }
         if (phase === 'practice' && !/\\d/.test(val)) {
           err.textContent = 'Enter your answers as numbers, e.g. 2 and 3 (fractions like 1/2 are fine).';
@@ -419,7 +464,8 @@ SESSION_JS = """
         return;
       }
       if (said) {
-        said.querySelector('code').textContent = input ? val : (e.submitter ? e.submitter.textContent.trim() : val);
+        const typed = (input || r1) && !ctrl;
+        said.querySelector('code').textContent = typed ? val : (e.submitter ? e.submitter.textContent.trim() : val);
         said.hidden = false;
       }
       form.hidden = true;

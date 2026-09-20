@@ -1,0 +1,17 @@
+==================================================
+             BUDGET TEST USAGE REPORT             
+==================================================
+Total Tokens Used  : 4050 tokens
+Total Token Calls  : 9 calls
+==================================================
+Call Breakdown:
+  Call #01: 500 tokens recorded (Cumulative in run: 500 tokens)
+  Call #02: 1000 tokens recorded (Cumulative in run: 1000 tokens)
+  Call #03: 1500 tokens recorded (Cumulative in run: 1500 tokens)
+  Call #04: 100 tokens recorded (Cumulative in run: 100 tokens)
+  Call #05: 200 tokens recorded (Cumulative in run: 300 tokens)
+  Call #06: 50 tokens recorded (Cumulative in run: 350 tokens)
+  Call #07: 300 tokens recorded (Cumulative in run: 300 tokens)
+  Call #08: 200 tokens recorded (Cumulative in run: 200 tokens)
+  Call #09: 200 tokens recorded (Cumulative in run: 200 tokens)
+==================================================

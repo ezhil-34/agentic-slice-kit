@@ -1,0 +1,35 @@
+================================================================================
+TEST REPORT: tests/test_tracker.py
+"Does the tracker domain logic operate correctly?"
+================================================================================
+
+SUMMARY:
+- Target Component : demo/tracker/ (Domain logic, root parsing, operator matching, strategy planning)
+- Total Tests      : 27 passed out of 27
+- Status           : ALL PASSED (100%)
+
+PURPOSE & OVERVIEW:
+This test file validates the pure deterministic math and business logic of the 
+Misconception Tracker domain:
+  - Root parsing: extracting float roots from permissive student input ("2 and 3", "x=2, x=3", "3/2").
+  - Root matching: set equality with float tolerance.
+  - Deterministic operator matching: formula_sign_flip, factor_sign_flip, formula_forgot_2a.
+  - Strategy planning: plan_strategy restrictions and method-change cost gates.
+
+--------------------------------------------------------------------------------
+TEST FUNCTION BREAKDOWN:
+--------------------------------------------------------------------------------
+
+1-7. Root Parsing & Matching Tests (test_parse_roots_basic, test_parse_roots_fractions, 
+     test_parse_roots_negative, test_roots_match_order_independent, etc.)
+   - Validates extracting roots from strings and order-independent set equality.
+
+8-15. Operator Matching Tests (test_match_operators_sign_flip_collision, 
+      test_match_operators_forgot_2a, test_match_operators_correct_answer_returns_empty, etc.)
+   - Validates code-driven bug prediction without invoking LLMs.
+
+16-27. Strategy Planning & Student Context Tests (test_plan_strategy_defaults, 
+       test_plan_strategy_filters_rejected, test_students_history_accumulation, etc.)
+   - Validates strategy planning logic and returning-student history linking.
+
+================================================================================

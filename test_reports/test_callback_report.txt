@@ -1,0 +1,63 @@
+================================================================================
+TEST REPORT: tests/test_callback.py
+"What happens while waiting for a human?"
+================================================================================
+
+SUMMARY:
+- Target Component : slice/callback.py (Human-in-the-loop state & timeouts)
+- Total Tests      : 13 passed out of 13
+- Status           : ALL PASSED (100%)
+
+PURPOSE & OVERVIEW:
+This test file validates human-in-the-loop interaction as a first-class STATE 
+rather than an exception or inline blocking call. When an agent asks a human a question:
+  1. The run transitions to state AWAITING_EXPERT and the process can safely terminate.
+  2. When an answer is provided, the run wakes up and transitions back to its resume state.
+  3. Answers are write-once (second answers are ignored to prevent double execution).
+  4. If an expert does not answer before the deadline, sweep() automatically times 
+     out the question and resumes the run cleanly with an unanswered record.
+
+--------------------------------------------------------------------------------
+TEST FUNCTION BREAKDOWN:
+--------------------------------------------------------------------------------
+
+1. test_ask_suspends_the_run
+   - Verifies ask() sets run state to RunState.AWAITING_EXPERT and generates question ID.
+
+2. test_ask_appends_a_question_record
+   - Confirms ask() writes a 'question' record into version history produced by 'system'.
+
+3. test_ask_creates_an_open_question_in_the_store
+   - Checks that the question is stored as open and unanswered in SQL questions table.
+
+4. test_answer_records_the_text_and_wakes_the_run
+   - Answering wakes run back to resume_state (e.g. RunState.PROBING) and marks question answered.
+
+5. test_answer_appends_expert_answer_record
+   - Writes 'expert_answer' record into version history with answer text, source, and who.
+
+6. test_answer_to_unknown_question_returns_none
+   - Returns None cleanly if answering a question ID that doesn't exist.
+
+7. test_double_answer_is_ignored
+   - Write-once semantics: second call to answer() for an already-answered question is safely ignored.
+
+8. test_sweep_expires_timed_out_questions
+   - Simulates time passage beyond expert_timeout_minutes; sweep() closes expired question with empty answer.
+
+9. test_sweep_wakes_run_when_question_expires
+   - Verifies sweeping an expired question wakes the run back to its resume_state.
+
+10. test_sweep_ignores_unexpired_questions
+    - Confirms active questions before timeout deadline remain untouched by sweep().
+
+11. test_pending_filters_out_answered_and_expired
+    - pending() returns only currently open, unexpired questions.
+
+12. test_resume_state_defaults_to_probing_if_unspecified
+    - If resume_state is omitted from question context, defaults safely to RunState.PROBING.
+
+13. test_sweep_with_run_id_filters_to_that_run
+    - Verifies sweep(store, run_id) only expires questions belonging to the specified run.
+
+================================================================================

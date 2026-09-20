@@ -131,11 +131,29 @@ def _print_new(store: Store, run_id: str, seen: int) -> int:
             matched = v.payload["matched_operators"]
             if len(matched) >= 2:
                 print(f"  {_c('match     ', DIM)} {_c('COLLISION', AMBER)} - "
-                      f"{', '.join(matched)} all fit; asking which method")
+                      f"{', '.join(matched)} all fit; asking which one")
             elif matched:
-                print(f"  {_c('match     ', DIM)} exact operator match: {matched[0]}")
+                print(f"  {_c('match     ', DIM)} exact operator match: {matched[0]} - asking to confirm")
             else:
-                print(f"  {_c('match     ', DIM)} no fixed operator matched - deferring to classify")
+                print(f"  {_c('match     ', DIM)} no fixed operator matched - asking for a step of working")
+        elif v.kind == "scaffold_attempt":
+            tag = _c("correct", GREEN) if v.payload["correct"] else _c("wrong", RED)
+            print(f"  {_c('warm-up   ', DIM)} {tag}   {v.payload['student_answer']!r}"
+                  f"   ({v.payload['scaffold_id']})")
+        elif v.kind == "confirmation":
+            print(f"  {_c('confirm   ', DIM)} {'yes' if v.payload['confirmed'] else 'no'}"
+                  f"   {', '.join(v.payload['candidates'])}")
+        elif v.kind == "intermediate_step":
+            print(f"  {_c('working   ', DIM)} {v.payload['kind']} via {v.payload['source']}"
+                  f" -> {v.payload['verdict'] or 'unclear'}"
+                  f"{' => ' + v.payload['resolved_operator'] if v.payload['resolved_operator'] else ''}")
+        elif v.kind == "scaffold_pick":
+            print(f"  {_c('warm-up   ', DIM)} round {v.payload['round']}: "
+                  f"{v.payload['scaffold_id'] or 'none left'}")
+        elif v.kind == "skipped":
+            print(f"  {_c('skipped   ', DIM)} {v.payload['question_id']}")
+        elif v.kind == "reviewed":
+            print(f"  {_c('shown     ', DIM)} {v.payload['solution']}")
         elif v.kind == "method_choice":
             note = " (defaulted, no answer)" if v.payload["defaulted"] else ""
             print(f"  {_c('resolve   ', DIM)} chose {v.payload['chosen_method']!r}"

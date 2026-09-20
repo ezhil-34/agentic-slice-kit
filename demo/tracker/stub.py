@@ -16,7 +16,7 @@ from typing import Any, Type
 
 from pydantic import BaseModel
 
-from .schema import CustomCheck, ErrorClassification, ReExplanation
+from .schema import CustomCheck, ErrorClassification, IntermediateValue, ReExplanation
 
 
 class FakeCall:
@@ -39,6 +39,13 @@ class FakeCall:
                 error_type=self.always_error_type, confidence=0.9,
                 reasoning="stub: no model called, always the same fixed answer for testing",
             )
+
+        if base == "extract":
+            # Canned: the first number in the student's reply, or null. Enough to
+            # prove the wiring (unlabeled working -> extraction -> code compares).
+            typed = user.split("Student's reply:", 1)[-1]
+            m = re.search(r"-?\d+(?:\.\d+)?", typed.replace("−", "-"))
+            return IntermediateValue(value=float(m.group(0)) if m else None)
 
         if base == "reexplain":
             m = re.search(r"explicitly asked for: (\w+)", user)
